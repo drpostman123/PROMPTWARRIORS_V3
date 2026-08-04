@@ -6,7 +6,7 @@ each idea is either structural (code) or governed (a measured unlock).
 
 | Source | Idea | Where it is enforced |
 |---|---|---|
-| Kelly (1956), Thorp | Sizing beats selection; overbetting destroys wealth even while winning | Phase ladder launches at flat 2% (≈ deliberately sub-Kelly); `scripts/edge_report.py` computes f* from logged outcomes and flags any ladder above **half**-Kelly |
+| Kelly (1956), Thorp | Sizing beats selection; overbetting destroys wealth even while winning — and the formula runs on the TRUE edge, which you only estimate | Phase ladder launches at flat 2% (≈ deliberately sub-Kelly) under a 4% hard cap; `scripts/edge_report.py` computes f* from logged outcomes AND a conservative f* at the Wilson 90% lower bound of the win rate (the "Kelly gap" = estimation risk), then checks the ladder against half of the *conservative* number |
 | Buffett letters | Never lose money = you cannot compound from zero | Circuit breaker (−6% day → flatten + disk-persisted lockout), 4%/7% caps that config can tighten but never loosen |
 | Mandelbrot | Your tail risk is larger than your model says | Defined-risk debit verticals **only** — max loss is the debit paid, structurally; no model estimates the tail because no position depends on estimating it |
 | Kahneman & Tversky (1979) | You take profits early and gamble on losers; your entry price hijacks your judgment | The exit engine owns every exit by priority (P0–P5); no rule consults feelings, and the stop fires on the spread mark your loss-aversion would argue with |

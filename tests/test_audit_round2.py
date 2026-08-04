@@ -157,6 +157,24 @@ def test_kelly_fraction():
     assert kelly_fraction(0.50, 1.0) == pytest.approx(0.0)
     assert kelly_fraction(0.40, 1.0) < 0
     assert kelly_fraction(0.5, 0.0) == 0.0
+    # Matches the (p*b - q)/b formulation exactly.
+    p, b = 0.55, 2.0
+    assert kelly_fraction(p, b) == pytest.approx((p * b - (1 - p)) / b) == pytest.approx(0.325)
+
+
+def test_wilson_bound_shrinks_small_samples():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from edge_report import kelly_fraction, wilson_lower_bound
+    # Same measured 60% hit rate: 30 trades cannot prove the edge, 500 can.
+    lb_small = wilson_lower_bound(0.60, 30)
+    lb_large = wilson_lower_bound(0.60, 500)
+    assert lb_small < lb_large < 0.60
+    # At 2:1 payoff the conservative Kelly stays positive even for small n,
+    # but a 55%-at-1:1 edge on 30 trades must NOT survive the bound.
+    assert kelly_fraction(wilson_lower_bound(0.55, 30), 1.0) <= 0
+    assert wilson_lower_bound(0.5, 0) == 0.0
 
 
 # ---- U5b: tick snapping ----------------------------------------------------

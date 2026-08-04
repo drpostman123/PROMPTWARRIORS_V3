@@ -40,6 +40,23 @@ def kelly_fraction(p: float, b: float) -> float:
     return p - (1.0 - p) / b
 
 
+def wilson_lower_bound(p_hat: float, n: int, z: float = 1.645) -> float:
+    """Wilson score lower bound (90% one-sided) for a binomial proportion.
+
+    The Kelly trap: the formula runs on the TRUE win rate and you only hold
+    an estimate. Sizing against the lower bound of that estimate — the worst
+    edge plausibly consistent with your sample — is how the estimation error
+    becomes a number instead of a hope. Small n pulls the bound hard toward
+    zero, which is exactly the behavior you want.
+    """
+    if n <= 0:
+        return 0.0
+    denom = 1.0 + z * z / n
+    center = p_hat + z * z / (2 * n)
+    margin = z * ((p_hat * (1 - p_hat) / n + z * z / (4 * n * n)) ** 0.5)
+    return max(0.0, (center - margin) / denom)
+
+
 def load_exits(path: Path) -> list[dict]:
     if not path.exists():
         raise SystemExit(f"no trade log at {path} — the system writes it as it trades")
@@ -97,10 +114,19 @@ def main() -> None:
     avg_loss = sum(losses) / len(losses) if losses else 0.0
     b = avg_win / avg_loss if avg_loss > 0 else 0.0
     f_star = kelly_fraction(p, b)
-    half = f_star / 2.0
+    # The Kelly gap: f* at the measured win rate vs f* at the worst win rate
+    # plausibly consistent with the sample (Wilson 90% lower bound). The gap
+    # IS your estimation risk; all sizing verdicts below use the conservative
+    # number — "full Kelly is for God, who knows the true probabilities."
+    p_lb = wilson_lower_bound(p, n)
+    f_cons = kelly_fraction(p_lb, b)
+    half = f_cons / 2.0
     print("— Kelly discipline (Kelly 1956 / Thorp) —")
     print(f"hit rate p={p:.3f}   avg win ${avg_win:,.0f}   avg loss ${avg_loss:,.0f}   payoff b={b:.2f}")
-    print(f"full Kelly f* = {f_star:+.3%}   half Kelly = {half:+.3%}")
+    print(f"full Kelly at measured p     = {f_star:+.3%}")
+    print(f"Wilson 90% lower bound of p  = {p_lb:.3f}  (n={n})")
+    print(f"conservative Kelly (at p_lb) = {f_cons:+.3%}   half of that = {half:+.3%}")
+    print(f"Kelly gap (estimation risk)  = {f_star - f_cons:.3%}")
     ladder_pct = None
     try:
         import yaml
@@ -115,11 +141,15 @@ def main() -> None:
     if f_star <= 0:
         print("VERDICT: NO MEASURED EDGE (f* <= 0). Any size is overbetting; the correct\n"
               "position is zero until the score threshold or gates change something.")
+    elif f_cons <= 0:
+        print("VERDICT: EDGE NOT YET PROVEN — the measured edge is positive but the\n"
+              "Wilson lower bound is not. The sample cannot rule out a losing strategy;\n"
+              "stay at the Phase-A floor and collect more outcomes.")
     elif ladder_pct is not None and ladder_pct > half:
-        print(f"VERDICT: LADDER ABOVE HALF-KELLY ({ladder_pct:.2%} > {half:.2%}) — "
-              "tighten sizing_ladder;\nvolatility is eating compounding even while winning.")
+        print(f"VERDICT: LADDER ABOVE HALF-CONSERVATIVE-KELLY ({ladder_pct:.2%} > {half:.2%})\n"
+              "— tighten sizing_ladder; at the worst plausible edge this is overbetting.")
     elif ladder_pct is not None:
-        print(f"VERDICT: OK — ladder {ladder_pct:.2%} <= half-Kelly {half:.2%}.")
+        print(f"VERDICT: OK — ladder {ladder_pct:.2%} <= half of conservative Kelly {half:.2%}.")
     print()
 
     # --- decay ---
