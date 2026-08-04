@@ -37,8 +37,10 @@ class RiskConfig(BaseModel):
     lockout_file: str = "state/lockout.json"
 
     # Score band -> fraction of the per-trade cap. Keys are lower score bounds.
+    # Phase A (launch): flat 2% (0.5 x 4%). Unlock Phase B {93:0.5, 97:0.75} then
+    # C {93:0.5, 97:1.0} only per the calibration governance in docs/DESIGN_SPEC.md §2.1.
     sizing_ladder: dict[int, float] = Field(
-        default={93: 0.50, 95: 0.75, 97: 1.00},
+        default={93: 0.50},
         description="Score band lower-bound -> multiplier on max_trade_risk_pct.",
     )
 
@@ -54,16 +56,22 @@ class RiskConfig(BaseModel):
 
 
 class ScoreWeights(BaseModel):
-    """Max points per Setup Score component. Must sum to 100."""
+    """Max points per Setup Score component. Must sum to 100.
 
-    opening_range: int = 15
-    breakout_confirmation: int = 20
-    mtf_alignment: int = 20
-    regime: int = 15
-    macro_cluster: int = 10
-    event_sentiment: int = 5
-    dow_vix_preference: int = 5
-    microstructure: int = 10
+    Defaults follow the debate-arbitrated weights (docs/DESIGN_SPEC.md §1.2):
+    microstructure and event cleanliness carry ZERO score weight — they act as
+    hard gates instead ("cost control is not alpha"; calendar points reward
+    the modal state and inflate scores exactly at threshold).
+    """
+
+    opening_range: int = 20
+    breakout_confirmation: int = 25
+    mtf_alignment: int = 21
+    regime: int = 20
+    macro_cluster: int = 8
+    event_sentiment: int = 0
+    dow_vix_preference: int = 6
+    microstructure: int = 0
 
     @model_validator(mode="after")
     def _sum_100(self) -> "ScoreWeights":
@@ -74,7 +82,7 @@ class ScoreWeights(BaseModel):
 
 
 class SignalConfig(BaseModel):
-    min_score: float = Field(93.0, ge=0, le=100)
+    min_score: float = Field(93.0, ge=90, le=100)   # 90 is the compiled floor (spec §preamble)
     weights: ScoreWeights = ScoreWeights()
 
     # Opening range (09:30-09:35 ET)
@@ -98,20 +106,21 @@ class SignalConfig(BaseModel):
     adx_period: int = 14
     adx_floor: float = 20.0
 
-    # Entry window (ET). Signals outside this window are rejected.
-    entry_window_start: time = time(9, 40)
+    # Entry window (ET). 09:50 start: regime needs 4 closed 5m bars (spec §arbitration).
+    entry_window_start: time = time(9, 50)
     entry_window_end: time = time(11, 30)
 
     # Regime
-    min_regime_confidence: float = Field(0.65, ge=0, le=1)
+    min_regime_confidence: float = Field(0.70, ge=0, le=1)
 
-    # VIX preference bands
-    vix_sweet_low: float = 13.0
-    vix_sweet_high: float = 24.0
+    # VIX preference bands (spec §1.2 VIXPREF)
+    vix_sweet_low: float = 14.0
+    vix_sweet_high: float = 22.0
     vix_hard_max: float = 32.0
 
-    # Day-of-week points (Mon..Fri)
-    dow_points: dict[str, int] = Field(default={"mon": 2, "tue": 3, "wed": 2, "thu": 3, "fri": 1})
+    # Day-of-week points: zero-weighted by default (spec: activatable only after
+    # >=40 same-weekday outcomes with binomial p<0.05).
+    dow_points: dict[str, int] = Field(default={"mon": 0, "tue": 0, "wed": 0, "thu": 0, "fri": 0})
 
 
 class EventConfig(BaseModel):
@@ -126,16 +135,19 @@ class EventConfig(BaseModel):
 
 class ExecutionConfig(BaseModel):
     underlying: Literal["SPY", "SPX", "AUTO"] = "SPY"
-    long_delta_min: float = 0.55
-    long_delta_max: float = 0.70
+    # Long leg |delta| in [0.45, 0.60], target 0.50 (spec §6.2 — pricier legs
+    # are unreachable under the debit cap).
+    long_delta_min: float = 0.45
+    long_delta_max: float = 0.60
     width_strikes_spy: int = Field(2, description="Vertical width in $1 SPY strikes.")
     width_points_spx: int = Field(20, description="Vertical width in SPX points.")
     min_debit_pct_of_width: float = Field(0.30, description="Debit floor: below this the fill is fantasy.")
-    max_debit_pct_of_width: float = Field(0.55, description="Debit cap: preserves reward:risk >= ~0.8.")
-    max_leg_spread_pct_of_mid: float = Field(6.0, description="Per-leg bid-ask limit as % of leg mid.")
-    max_leg_spread_abs: float = Field(0.10, description="Per-leg absolute bid-ask limit (SPY scale; x10 SPX).")
-    min_open_interest: int = 250
-    quote_staleness_sec: float = 3.0
+    max_debit_pct_of_width: float = Field(0.42, description="Acceptance cap at mid (spec §6.2); ladder cap 0.45W keeps RR >= 1.22.")
+    ladder_cap_pct_of_width: float = Field(0.45, description="Absolute worst-fill price cap as fraction of width.")
+    max_leg_spread_pct_of_mid: float = Field(10.0, description="Per-leg bid-ask limit as % of leg mid (spec §6.3).")
+    max_leg_spread_abs: float = Field(0.05, description="Per-leg absolute bid-ask limit (SPY; SPX uses x12).")
+    min_open_interest: int = 500
+    quote_staleness_sec: float = 1.5
 
     # Entry ladder: start at mid, walk toward ask in steps.
     ladder_start_frac: float = Field(0.50, description="0.5 = start at mid of natural/mid range.")
@@ -146,14 +158,15 @@ class ExecutionConfig(BaseModel):
 
 
 class ExitConfig(BaseModel):
-    profit_target_pct: dict[int, float] = Field(
-        default={93: 60.0, 95: 80.0, 97: 100.0},
-        description="Score band -> profit target as % of debit paid.",
-    )
-    hard_stop_pct: float = Field(50.0, description="Exit if vertical value drops this % below debit.")
-    time_stop: time = time(15, 15)
-    force_flat: time = time(15, 45)
-    structure_stop: bool = Field(True, description="Exit on close back through the opening-range midpoint.")
+    """Exit parameters per the arbitrated priority table (spec §7)."""
+
+    profit_target_mult: float = Field(1.65, description="P4a: close at mark >= this x entry debit...")
+    profit_target_width_frac: float = Field(0.80, description="...capped at this x width (bid thins beyond).")
+    hard_stop_pct: float = Field(50.0, description="P3: mark <= (1 - this%) x debit, 2 consecutive marks.")
+    max_hold_min: int = Field(90, description="P5: close if held this long with mark < 1.10 x debit.")
+    stale_flush: time = time(14, 50)
+    force_flat: time = time(15, 30)
+    structure_stop: bool = Field(True, description="P4b: close through OR trigger with P&L < +10% of debit.")
 
 
 class DataConfig(BaseModel):

@@ -136,10 +136,13 @@ class TastytradeBroker(Broker):
         natural_mid = long_q.mid - short_q.mid
         natural_ask = long_q.ask - short_q.bid
 
+        # Absolute worst-fill cap: never above 110% of the approved debit AND
+        # never above ladder_cap_pct_of_width x width (keeps RR >= 1.22, spec §6.4).
+        price_cap = min(v.debit * 1.10, self._cfg.ladder_cap_pct_of_width * v.width)
         for step in range(self._cfg.ladder_max_steps + 1):
             px = round(natural_mid + (natural_ask - natural_mid)
                        * min(1.0, step * self._cfg.ladder_step_frac), 2)
-            px = min(px, v.debit * 1.10)  # never chase past 110% of the approved debit
+            px = min(px, price_cap)
             order = NewOrder(
                 time_in_force=OrderTimeInForce.DAY,
                 order_type=OrderType.LIMIT,

@@ -46,11 +46,11 @@ def test_ladder_multiplier():
 
 
 def test_size_trade_respects_cap():
-    cfg = RiskConfig()
+    cfg = RiskConfig()   # Phase A ladder: flat 0.5 x 4% = 2%
     contracts, risk = size_trade(score=100.0, equity=50_000, debit_per_share=1.25,
                                  contract_multiplier=100, cfg=cfg)
     assert risk <= 50_000 * 0.04
-    assert contracts == int(50_000 * 0.04 // 125)
+    assert contracts == int(50_000 * 0.02 // 125)
 
 
 def test_size_trade_zero_when_too_small():

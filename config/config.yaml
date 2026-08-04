@@ -15,35 +15,36 @@ risk:
   max_data_staleness_sec: 5
   min_intent_spacing_sec: 60
   lockout_file: state/lockout.json
-  sizing_ladder:            # score band lower bound -> fraction of the 4% cap
+  # Phase A launch ladder (docs/DESIGN_SPEC.md §2.1): flat 2% of equity.
+  # Phase B {93: 0.5, 97: 0.75} and C {93: 0.5, 97: 1.0} unlock only after
+  # the calibration gates in the spec are met.
+  sizing_ladder:
     93: 0.50
-    95: 0.75
-    97: 1.00
 
 signal:
-  min_score: 93
-  weights:                  # must sum to 100
-    opening_range: 15
-    breakout_confirmation: 20
-    mtf_alignment: 20
-    regime: 15
-    macro_cluster: 10
-    event_sentiment: 5
-    dow_vix_preference: 5
-    microstructure: 10
-  or_min_width_pct: 0.05
-  or_max_width_pct: 0.35
+  min_score: 93             # compiled floor is 90; may only be raised
+  weights:                  # arbitrated weights (spec §1.2); must sum to 100.
+    opening_range: 20       # micro + event carry 0 points — they are hard
+    breakout_confirmation: 25   # gates, not alpha.
+    mtf_alignment: 21
+    regime: 20
+    macro_cluster: 8
+    event_sentiment: 0
+    dow_vix_preference: 6
+    microstructure: 0
+  or_min_width_pct: 0.07
+  or_max_width_pct: 0.40
   or_max_width_atr_mult: 1.2
-  breakout_buffer_pct: 0.02
+  breakout_buffer_pct: 0.03
   min_rel_volume: 1.3
   min_close_location: 0.7
-  entry_window_start: "09:40:00"
+  entry_window_start: "09:50:00"   # regime needs 4 closed 5m bars
   entry_window_end: "11:30:00"
-  min_regime_confidence: 0.65
-  vix_sweet_low: 13
-  vix_sweet_high: 24
+  min_regime_confidence: 0.70
+  vix_sweet_low: 14
+  vix_sweet_high: 22
   vix_hard_max: 32
-  dow_points: {mon: 2, tue: 3, wed: 2, thu: 3, fri: 1}
+  dow_points: {mon: 0, tue: 0, wed: 0, thu: 0, fri: 0}   # earn weight via calibration only
 
 events:
   blackout_before_min: 30
@@ -53,27 +54,30 @@ events:
 
 execution:
   underlying: SPY           # SPY | SPX | AUTO
-  long_delta_min: 0.55
-  long_delta_max: 0.70
+  long_delta_min: 0.45      # target 0.50 (spec §6.2)
+  long_delta_max: 0.60
   width_strikes_spy: 2
   width_points_spx: 20
   min_debit_pct_of_width: 0.30
-  max_debit_pct_of_width: 0.55
-  max_leg_spread_pct_of_mid: 6.0
-  max_leg_spread_abs: 0.10
-  min_open_interest: 250
-  quote_staleness_sec: 3
+  max_debit_pct_of_width: 0.42   # acceptance at mid; ladder cap below keeps RR >= 1.22
+  ladder_cap_pct_of_width: 0.45
+  max_leg_spread_pct_of_mid: 10.0
+  max_leg_spread_abs: 0.05
+  min_open_interest: 500
+  quote_staleness_sec: 1.5
   ladder_step_frac: 0.15
-  ladder_step_wait_sec: 5
-  ladder_max_steps: 3
+  ladder_step_wait_sec: 4
+  ladder_max_steps: 4
   entry_abandon_sec: 30
 
-exits:
-  profit_target_pct: {93: 60, 95: 80, 97: 100}
-  hard_stop_pct: 50
-  time_stop: "15:15:00"
-  force_flat: "15:45:00"
-  structure_stop: true
+exits:                       # arbitrated priority table (spec §7)
+  profit_target_mult: 1.65   # P4a: 1.65 x debit ...
+  profit_target_width_frac: 0.80   # ... capped at 0.80 x width
+  hard_stop_pct: 50          # P3, on 2 consecutive spread marks
+  max_hold_min: 90           # P5
+  stale_flush: "14:50:00"    # P5 losing flush
+  force_flat: "15:30:00"     # P1, unconditional
+  structure_stop: true       # P4b
 
 data:
   bar_seconds: 60

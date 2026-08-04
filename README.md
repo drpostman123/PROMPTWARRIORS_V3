@@ -64,34 +64,39 @@ godmode0dte/
 └── dashboard/app.py     Streamlit dashboard
 ```
 
-### Setup Score (100 points, trade at ≥ 93)
+### Setup Score (100 points, trade at ≥ 93 — arbitrated weights, spec §1.2)
 
 | Component | Max | What earns it |
 |---|---|---|
-| Opening range | 15 | OR (09:30–09:35 ET) complete, width within % and ATR bands |
-| Breakout confirmation | 20 | Close beyond OR edge + relative volume ≥ 1.3× + close-location ≥ 0.7 |
-| MTF alignment | 20 | 1m/5m/15m EMA(9/21) order, VWAP side, RSI bands, ADX ≥ 20 |
-| Regime | 15 | Trend regime matches direction, confidence-scaled (rules or HMM) |
-| Macro cluster | 10 | DXY/VIX/yields/gold confirmation (VIX half-weighted to avoid double-counting) |
-| Event/sentiment | 5 | Clean calendar; high-impact windows are hard gates, not point deductions |
-| Day-of-week / VIX prefs | 5 | Modest priors: Tue/Thu favored, VIX 13–24 sweet spot |
-| Microstructure | 10 | Both legs: tight spreads, OI, fresh quotes — graded, gated |
+| Opening range | 20 | OR (09:30–09:35 ET) complete, width within % and ATR bands |
+| Breakout confirmation | 25 | Close beyond OR edge + relative volume ≥ 1.3× + close-location ≥ 0.7 |
+| MTF alignment | 21 | 1m/5m/15m EMA(9/21) order, VWAP side, RSI bands, ADX floor |
+| Regime | 20 | Trend regime matches direction, confidence ≥ 0.70, confidence-scaled |
+| Macro cluster | 8 | DXY/VIX/yields/gold confirmation (VIX half-weighted — dedup rule) |
+| VIX preference | 6 | VIX 14–22 sweet spot (day-of-week priors zeroed until calibrated) |
+| Event / microstructure | 0 | **Gates, not points** — the debate's ruling: cost control is not alpha, and calendar-cleanliness points inflate scores exactly at threshold |
 
 **Hard gates** (zero the setup regardless of points): no confirmed breakout, OR
 width filter fail, event blackout (FOMC day = full lockout), forced-bias
-conflict, extreme vol regime / VIX > 32, counter-regime signal.
+conflict, extreme vol regime / VIX > 32, counter-regime signal, leg
+liquidity/OI/staleness failures, **one-shot rule** (a losing trade closes that
+direction for the day). Entries only 09:50–11:30 ET — the regime layer needs
+four closed 5-minute bars, and late breakouts underperform.
 
-Score bands scale size *within* the 4% cap: 93→2%, 95→3%, 97+→4% of equity.
-Profit targets scale the same way: +60% / +80% / +100% of debit.
+**Sizing is phased** (spec §2.1): launch is a flat **2%** of equity per trade.
+The 3%/4% tiers for 97+ scores unlock only after ≥ 200 logged outcomes show
+score→hit-rate monotonicity (Wilson lower bound above breakeven). The 4%
+per-trade cap is the compiled ceiling in every phase.
 
-### Exit priority (first hit wins)
+### Exit priority (spec §7 — first hit wins, strict pre-emption)
 
-1. Circuit breaker (flatten all, urgent)
-2. Heat breach (trim worst position)
-3. Hard stop: −50% of debit
-4. Structure stop: close back through OR midpoint
-5. Time stop 15:15 ET → 6. Force-flat 15:45 ET (no exceptions)
-7. Profit target (score-dependent)
+- **P0** Circuit breaker → flatten all, urgent (beats a position up 80%)
+- **P1** 15:30 ET force-flat → unconditional, urgent
+- **P2** Heat `Σ max(entry_debit, mark)` > 7% → close largest-heat position
+- **P3** Hard stop: mark ≤ 50% of debit on **2 consecutive marks** (spread mark, never underlying-only)
+- **P4a** Profit: mark ≥ min(1.65 × debit, 0.80 × width)
+- **P4b** Structure: close back through the OR trigger with P&L < +10% of debit
+- **P5** Time: held ≥ 90 min with mark < 1.10 × debit, or open at 14:50 below entry
 
 ## Setup (Ubuntu)
 

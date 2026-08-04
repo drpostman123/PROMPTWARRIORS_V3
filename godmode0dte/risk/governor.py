@@ -112,6 +112,10 @@ class RiskGovernor:
         return [p for p in self._positions.values() if p.open]
 
     @property
+    def closed_positions(self) -> list[Position]:
+        return [p for p in self._positions.values() if not p.open]
+
+    @property
     def open_risk_dollars(self) -> float:
         return sum(p.risk_dollars for p in self.open_positions)
 

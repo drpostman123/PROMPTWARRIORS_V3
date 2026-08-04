@@ -191,6 +191,16 @@ class GodModeApp:
             if direction != event_verdict.forced_bias:
                 direction = None  # bias-only day: wrong-way signals do not exist
 
+        # One-shot rule (spec G-S9): a losing trade in this direction today
+        # closes that side for the rest of the session.
+        if direction is not None and any(
+            p.vertical.direction == direction and p.pnl < 0
+            for p in self.governor.closed_positions
+        ):
+            self.store.log_decision({"kind": "reject", "reason": "one_shot_rule",
+                                     "detail": f"{direction.value} already lost today"})
+            direction = None
+
         build: Optional[BuildResult] = None
         if direction is not None:
             live_chain = [
@@ -272,13 +282,19 @@ class GodModeApp:
             self.machine.transition(TradingState.SCANNING, "entry unfilled")
             return
         or_range = self.or_tracker.range
+        # Structure-stop reference = the OR trigger level that was broken
+        # (OR high for longs, OR low for shorts), per spec §7 P4b.
+        if or_range is not None:
+            trigger = or_range.high if approved.vertical.direction is Direction.LONG else or_range.low
+        else:
+            trigger = fill.price
         pos = Position(
             trade_id=approved.trade_id,
             vertical=approved.vertical,
             entry_debit=fill.price,
             entry_ts=fill.ts,
             score_at_entry=approved.score,
-            or_mid=or_range.mid if or_range else fill.price,
+            or_mid=trigger,
             current_value=fill.price,
         )
         self.governor.register_position(pos)

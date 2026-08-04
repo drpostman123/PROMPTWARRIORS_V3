@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
 
+import pytest
+
 from godmode0dte.config import ExitConfig, SignalConfig
 from godmode0dte.data.calendar import EventVerdict
-from godmode0dte.execution.exits import profit_target_pct
 from godmode0dte.models import (
     Bar, Direction, Quote, Regime, RegimeState, VolRegime,
 )
@@ -115,8 +116,10 @@ def test_score_breakdown_is_transparent():
     assert score.total == round(sum(c.points for c in score.components), 2)
 
 
-def test_profit_target_scales_with_score():
+def test_profit_target_capped_by_width():
+    """P4a: target = min(1.65 x debit, 0.80 x width)."""
     cfg = ExitConfig()
-    assert profit_target_pct(93.0, cfg) == 60.0
-    assert profit_target_pct(96.0, cfg) == 80.0
-    assert profit_target_pct(98.0, cfg) == 100.0
+    # Cheap debit: 1.65x binds. 0.60 debit on 2-wide -> target 0.99 < 1.60.
+    assert min(0.60 * cfg.profit_target_mult, 2.0 * cfg.profit_target_width_frac) == pytest.approx(0.99)
+    # Rich debit: width cap binds. 1.05 debit on 2-wide -> 1.7325 > 1.60 -> 1.60.
+    assert min(1.05 * cfg.profit_target_mult, 2.0 * cfg.profit_target_width_frac) == pytest.approx(1.60)

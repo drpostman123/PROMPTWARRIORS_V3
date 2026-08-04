@@ -41,13 +41,23 @@ def test_score_below_min_rejected(cfg, governor):
     assert isinstance(result, Rejection) and result.reason == "score_below_min"
 
 
-def test_sizing_ladder_scales_with_score(cfg, governor):
+def test_phase_a_ladder_is_flat_2pct(cfg, governor):
+    """Launch ladder: 2% at every score (Phase B/C unlock via calibration)."""
     entry_window_now(cfg)
     r93 = governor.evaluate(make_intent(score=93.5, debit=1.0, contracts=1000))
     r97 = governor.evaluate(make_intent(score=97.5, debit=1.0, contracts=1000))
     assert isinstance(r93, ApprovedTrade) and isinstance(r97, ApprovedTrade)
-    assert r93.risk_dollars == pytest.approx(100_000 * 0.04 * 0.50, rel=0.03)
-    assert r97.risk_dollars == pytest.approx(100_000 * 0.04 * 1.00, rel=0.03)
+    assert r93.risk_dollars == pytest.approx(100_000 * 0.02, rel=0.03)
+    assert r97.risk_dollars == pytest.approx(100_000 * 0.02, rel=0.03)
+
+
+def test_phase_c_ladder_scales_but_stays_capped(cfg, governor):
+    entry_window_now(cfg)
+    cfg.risk.sizing_ladder = {93: 0.5, 97: 1.0}   # Phase C
+    r97 = governor.evaluate(make_intent(score=99.0, debit=1.0, contracts=1000))
+    assert isinstance(r97, ApprovedTrade)
+    assert r97.risk_dollars == pytest.approx(100_000 * 0.04, rel=0.03)
+    assert r97.risk_dollars <= 100_000 * 0.04 + 1e-6
 
 
 def test_heat_cap_resizes_then_rejects(cfg, governor):

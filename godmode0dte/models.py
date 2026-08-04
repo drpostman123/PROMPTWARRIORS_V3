@@ -167,7 +167,14 @@ class Position:
 
     @property
     def risk_dollars(self) -> float:
-        return self.entry_debit * self.vertical.contracts * 100
+        """Heat contribution: max(entry_debit, current mark) x contracts x 100.
+
+        Using the max means winners keep consuming risk budget at their marked
+        value while losers still count at full entry risk (spec §2.3 P2 —
+        entry-debit-only undercounts what a winner has at risk).
+        """
+        per_share = max(self.entry_debit, self.current_value)
+        return per_share * self.vertical.contracts * 100
 
     @property
     def pnl(self) -> float:
