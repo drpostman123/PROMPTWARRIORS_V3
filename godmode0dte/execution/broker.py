@@ -34,14 +34,29 @@ class Fill:
     partial: bool = False
 
 
+def snap_tick(px: float, underlying: str, round_up: bool) -> float:
+    """Snap to the venue tick: SPY 0.01; SPX 0.05 under $3.00 else 0.10.
+    Entries round DOWN (never pay above the cap), exit credits round UP."""
+    if underlying == "SPY":
+        tick = 0.01
+    else:
+        tick = 0.05 if px < 3.00 else 0.10
+    import math
+    n = px / tick
+    snapped = math.ceil(n - 1e-9) if round_up else math.floor(n + 1e-9)
+    return round(snapped * tick, 2)
+
+
 class Broker(ABC):
     @abstractmethod
     async def equity(self) -> float: ...
 
     @abstractmethod
     async def open_position(self, approved: ApprovedTrade,
-                            long_q: Quote, short_q: Quote) -> Optional[Fill]:
-        """Enter the vertical with a laddered limit order. None = unfilled/abandoned."""
+                            long_q: Quote, short_q: Quote,
+                            quote_getter=None) -> Optional[Fill]:
+        """Enter the vertical with a laddered limit order. None = unfilled/abandoned.
+        `quote_getter()` -> (long_q, short_q) re-fetches fresh leg quotes between rungs."""
 
     @abstractmethod
     async def close_position(self, trade_id: str, vertical: VerticalSpec,
@@ -66,7 +81,8 @@ class PaperBroker(Broker):
         self._equity += delta
 
     async def open_position(self, approved: ApprovedTrade,
-                            long_q: Quote, short_q: Quote) -> Optional[Fill]:
+                            long_q: Quote, short_q: Quote,
+                            quote_getter=None) -> Optional[Fill]:
         natural_mid = long_q.mid - short_q.mid
         natural_ask = long_q.ask - short_q.bid
         # Paper assumption: fill one ladder step above mid (realistic-ish slippage).
@@ -125,7 +141,8 @@ class TastytradeBroker(Broker):
         return await self._account.a_get_positions(self._session)
 
     async def open_position(self, approved: ApprovedTrade,
-                            long_q: Quote, short_q: Quote) -> Optional[Fill]:
+                            long_q: Quote, short_q: Quote,
+                            quote_getter=None) -> Optional[Fill]:
         from decimal import Decimal
         from tastytrade.instruments import Option
         from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType
@@ -133,16 +150,36 @@ class TastytradeBroker(Broker):
         v = approved.vertical
         long_opt = await Option.a_get(self._session, v.long_symbol)
         short_opt = await Option.a_get(self._session, v.short_symbol)
-        natural_mid = long_q.mid - short_q.mid
-        natural_ask = long_q.ask - short_q.bid
 
-        # Absolute worst-fill cap: never above 110% of the approved debit AND
-        # never above ladder_cap_pct_of_width x width (keeps RR >= 1.22, spec §6.4).
-        price_cap = min(v.debit * 1.10, self._cfg.ladder_cap_pct_of_width * v.width)
+        # Worst-fill cap comes from the governor (sizing was done AT this price —
+        # audit U1); assert the money invariant before every submit.
+        price_cap = approved.cap_price or min(v.debit * 1.10,
+                                              self._cfg.ladder_cap_pct_of_width * v.width)
+        last_px = 0.0
         for step in range(self._cfg.ladder_max_steps + 1):
-            px = round(natural_mid + (natural_ask - natural_mid)
-                       * min(1.0, step * self._cfg.ladder_step_frac), 2)
-            px = min(px, price_cap)
+            # Intent age wall (spec §6.4): a 90s-old signal is a different market.
+            age = (datetime.now(timezone.utc) - approved.approved_ts).total_seconds()
+            if age > self._cfg.intent_max_age_sec:
+                log.warning("entry_abandoned_age", trade_id=approved.trade_id, age=age)
+                break
+            # Re-quote between rungs; refuse stale legs (audit U5c).
+            if quote_getter is not None:
+                fresh = quote_getter()
+                if fresh is None:
+                    log.warning("entry_abandoned_quotes", trade_id=approved.trade_id)
+                    break
+                long_q, short_q = fresh
+            q_age = (datetime.now(timezone.utc) - min(long_q.ts, short_q.ts)).total_seconds()
+            if q_age > self._cfg.quote_staleness_sec + self._cfg.ladder_step_wait_sec:
+                log.warning("entry_abandoned_stale", trade_id=approved.trade_id, q_age=q_age)
+                break
+            natural_mid = long_q.mid - short_q.mid
+            natural_ask = long_q.ask - short_q.bid
+            px = natural_mid + (natural_ask - natural_mid) * min(1.0, step * self._cfg.ladder_step_frac)
+            px = snap_tick(min(px, price_cap), v.underlying, round_up=False)
+            last_px = px
+            assert v.contracts * px * 100 <= approved.risk_dollars + 1e-6, \
+                "entry ladder price would exceed governor-approved risk"
             order = NewOrder(
                 time_in_force=OrderTimeInForce.DAY,
                 order_type=OrderType.LIMIT,
@@ -154,13 +191,49 @@ class TastytradeBroker(Broker):
             )
             resp = await self._account.a_place_order(self._session, order, dry_run=False)
             placed = resp.order
-            filled = await self._await_fill(placed, self._cfg.ladder_step_wait_sec)
-            if filled:
+            if await self._await_fill(placed, self._cfg.ladder_step_wait_sec):
                 log.info("entry_filled", trade_id=approved.trade_id, price=px, step=step)
                 return Fill(approved.trade_id, px, datetime.now(timezone.utc))
-            await self._account.a_delete_order(self._session, placed.id)
+            # Cancel-vs-fill race (audit B3): the cancel can lose to a fill.
+            try:
+                await self._account.a_delete_order(self._session, placed.id)
+            except Exception as e:                  # noqa: BLE001 — may already be filled
+                log.warning("entry_cancel_failed", trade_id=approved.trade_id, error=str(e))
+                outcome = await self._resolve_terminal(placed.id, 10.0)
+                if outcome == "filled":
+                    return Fill(approved.trade_id, px, datetime.now(timezone.utc))
+                if outcome == "unknown":
+                    break                            # reconcile below; never re-ladder blind
+        # Before declaring the entry dead, ask the broker: did a fill land anyway?
+        try:
+            positions = await self._account.a_get_positions(self._session)
+            if any(getattr(p, "symbol", None) == v.long_symbol for p in positions):
+                log.warning("entry_reconciled_filled", trade_id=approved.trade_id)
+                return Fill(approved.trade_id, last_px or price_cap, datetime.now(timezone.utc))
+        except Exception as e:                      # noqa: BLE001
+            log.error("entry_reconcile_failed", trade_id=approved.trade_id, error=str(e))
         log.warning("entry_abandoned", trade_id=approved.trade_id)
         return None
+
+    async def _resolve_terminal(self, order_id, timeout_sec: float) -> str:
+        """Poll an order to a terminal state: 'filled' | 'gone' | 'unknown'."""
+        from tastytrade.order import OrderStatus
+        deadline = asyncio.get_event_loop().time() + timeout_sec
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                orders = await self._account.a_get_live_orders(self._session)
+            except Exception:                        # noqa: BLE001
+                await asyncio.sleep(1.0)
+                continue
+            match = next((o for o in orders if o.id == order_id), None)
+            if match is None:
+                return "gone"                        # not live: cancelled or same-day filled-and-dropped
+            if match.status == OrderStatus.FILLED:
+                return "filled"
+            if match.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.EXPIRED):
+                return "gone"
+            await asyncio.sleep(1.0)
+        return "unknown"
 
     async def close_position(self, trade_id: str, vertical: VerticalSpec,
                              long_q: Quote, short_q: Quote,
@@ -188,7 +261,7 @@ class TastytradeBroker(Broker):
             px = mid_credit - (mid_credit - natural_credit) * min(1.0, step * step_frac)
             if urgency == "urgent" and step == steps[-1]:
                 px = natural_credit - 0.05          # through the market: get out, now
-            px = round(max(px, 0.0), 2)
+            px = snap_tick(max(px, 0.0), vertical.underlying, round_up=True)
             order = NewOrder(
                 time_in_force=OrderTimeInForce.DAY,
                 order_type=OrderType.LIMIT,
@@ -203,12 +276,19 @@ class TastytradeBroker(Broker):
             if await self._await_fill(placed, wait):
                 log.info("exit_filled", trade_id=trade_id, price=px, step=step, urgency=urgency)
                 return Fill(trade_id, px, datetime.now(timezone.utc))
+            # Spec §7: an unconfirmed cancel gets NO replacement until its status
+            # resolves — two live closers can both fill and manufacture a fresh
+            # short vertical (audit B9).
             try:
                 await self._account.a_delete_order(self._session, placed.id)
             except Exception as e:                  # noqa: BLE001 — may already be filled
                 log.warning("exit_cancel_failed", trade_id=trade_id, error=str(e))
-                if await self._await_fill(placed, 2.0):
+                outcome = await self._resolve_terminal(placed.id, 10.0)
+                if outcome == "filled":
                     return Fill(trade_id, px, datetime.now(timezone.utc))
+                if outcome == "unknown":
+                    log.error("exit_cancel_unresolved", trade_id=trade_id, order_id=placed.id)
+                    return None                     # risk task retries next tick
         log.error("exit_ladder_exhausted", trade_id=trade_id, urgency=urgency)
         return None
 

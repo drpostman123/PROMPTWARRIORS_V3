@@ -40,6 +40,7 @@ def make_inputs(**over) -> ScoringInputs:
         or_width_ok=True,
         or_width_reason="ok",
         rel_volume=2.0,
+        breakout_age_min=0.0,
         regime=RegimeState(Regime.TREND_UP, VolRegime.NORMAL, confidence=0.95),
         macro_points=10.0,
         macro_detail="fully aligned",

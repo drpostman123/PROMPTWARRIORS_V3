@@ -155,8 +155,9 @@ class Position:
     entry_debit: float               # actual fill, per share
     entry_ts: datetime
     score_at_entry: float
-    or_mid: float                    # opening-range midpoint for the structure stop
+    or_mid: float                    # structure-stop reference (OR trigger level)
     current_value: float = 0.0
+    mark_ts: Optional[datetime] = None   # when current_value was last refreshed
     exit_ts: Optional[datetime] = None
     exit_value: Optional[float] = None
     exit_reason: Optional[str] = None

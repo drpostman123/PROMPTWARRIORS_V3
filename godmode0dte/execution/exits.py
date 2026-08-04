@@ -35,10 +35,12 @@ class ExitDecision:
 
 
 class ExitEngine:
-    def __init__(self, cfg: ExitConfig, governor: RiskGovernor, tz: str = "America/New_York") -> None:
+    def __init__(self, cfg: ExitConfig, governor: RiskGovernor, tz: str = "America/New_York",
+                 mark_staleness_sec: float = 15.0) -> None:
         self._cfg = cfg
         self._gov = governor
         self._tz = ZoneInfo(tz)
+        self._mark_staleness = mark_staleness_sec
         self._stop_hits: dict[str, int] = {}     # P3 consecutive-mark counter
 
     def evaluate(self, now: datetime, underlying_price: Optional[float]) -> list[ExitDecision]:
@@ -80,15 +82,25 @@ class ExitEngine:
         mark = p.current_value
         debit = p.entry_debit
 
-        # P3 — hard stop on the spread mark, 2 consecutive marks required.
-        if mark > 0 and mark <= debit * (1 - self._cfg.hard_stop_pct / 100.0):
-            hits = self._stop_hits.get(p.trade_id, 0) + 1
-            self._stop_hits[p.trade_id] = hits
-            if hits >= 2:
-                return ExitDecision(p.trade_id, "hard_stop", "urgent",
-                                    f"mark {mark:.2f} <= stop on debit {debit:.2f} (x{hits})")
+        # P3 — hard stop on the spread mark, 2 consecutive FRESH marks required.
+        # A 0.00 mark is a valid (worthless) state and must fire (audit B7);
+        # a stale mark (feed frozen) must not count toward confirmation.
+        mark_fresh = p.mark_ts is None or (now - p.mark_ts).total_seconds() <= self._mark_staleness
+        if mark <= debit * (1 - self._cfg.hard_stop_pct / 100.0):
+            if mark_fresh:
+                hits = self._stop_hits.get(p.trade_id, 0) + 1
+                self._stop_hits[p.trade_id] = hits
+                if hits >= 2:
+                    return ExitDecision(p.trade_id, "hard_stop", "urgent",
+                                        f"mark {mark:.2f} <= stop on debit {debit:.2f} (x{hits})")
         else:
             self._stop_hits.pop(p.trade_id, None)
+
+        # Frozen-mark hazard: mark far beyond staleness with an open position —
+        # escalate to an urgent close rather than trading blind (audit B7/B8).
+        if p.mark_ts is not None and (now - p.mark_ts).total_seconds() > 10 * self._mark_staleness:
+            return ExitDecision(p.trade_id, "stale_mark", "urgent",
+                                f"mark frozen {(now - p.mark_ts).total_seconds():.0f}s")
 
         # P4a — profit target: 1.65 x debit, capped at 0.80 x width.
         target = min(debit * self._cfg.profit_target_mult,

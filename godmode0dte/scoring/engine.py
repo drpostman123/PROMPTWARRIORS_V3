@@ -25,7 +25,7 @@ import numpy as np
 
 from godmode0dte.config import SignalConfig
 from godmode0dte.data.calendar import EventVerdict
-from godmode0dte.features.indicators import adx, ema, rsi, vwap
+from godmode0dte.features.indicators import atr, ema, vwap
 from godmode0dte.features.bars import resample
 from godmode0dte.features.orderbook import BookState
 from godmode0dte.models import (
@@ -41,6 +41,7 @@ class ScoringInputs:
     or_width_ok: bool
     or_width_reason: str
     rel_volume: float
+    breakout_age_min: float
     regime: RegimeState
     macro_points: float                   # pre-computed by MacroCluster for direction
     macro_detail: str
@@ -127,50 +128,76 @@ class ScoreEngine:
             return ScoreComponent("breakout_confirmation", 0, mx, "no breakout")
         clv = float(inp.breakout_evidence.get("clv", 0.5))
         clv_eff = clv if inp.direction is Direction.LONG else 1.0 - clv
-        # Half the points for relative volume beyond threshold, half for CLV.
+        # Half for relative volume beyond threshold, half for CLV; the whole
+        # component decays linearly with breakout age (spec §1.2 ORB decay) —
+        # a 25-minute-old breakout is nearly worthless information.
         rv_frac = min(1.0, (inp.rel_volume - self._cfg.min_rel_volume) / self._cfg.min_rel_volume + 0.5)
         clv_frac = min(1.0, max(0.0, (clv_eff - self._cfg.min_close_location) / (1 - self._cfg.min_close_location)))
-        pts = mx * (0.5 * max(0.0, rv_frac) + 0.5 * clv_frac)
-        detail = f"rel_vol={inp.rel_volume:.2f}, clv={clv_eff:.2f}"
+        decay = max(0.0, 1.0 - inp.breakout_age_min / self._cfg.breakout_decay_min)
+        pts = mx * (0.5 * max(0.0, rv_frac) + 0.5 * clv_frac) * decay
+        detail = f"rel_vol={inp.rel_volume:.2f}, clv={clv_eff:.2f}, decay={decay:.2f}"
         return ScoreComponent("breakout_confirmation", round(pts, 2), mx, detail)
 
     def _score_mtf(self, inp: ScoringInputs, mx: int) -> ScoreComponent:
-        """EMA order + VWAP side + RSI band + ADX floor across 1m/5m/15m."""
-        if inp.direction is None or len(inp.bars_1m) < 30:
+        """VWAP structure + higher-timeframe alignment (spec §1.2 VWAP/MTF rows).
+
+        Five sub-parts scaled to mx (nominal 6/5/4/4/2 of 21). Every sub-part
+        is deterministically evaluable or scores an explicit zero — an
+        unevaluable timeframe FAILS rather than silently vanishing from the
+        denominator (audit U4c).
+        """
+        if inp.direction is None or len(inp.bars_1m) < 10:
             return ScoreComponent("mtf_alignment", 0, mx, "insufficient bars")
         sign = 1 if inp.direction is Direction.LONG else -1
-        checks: list[tuple[str, bool]] = []
+        scale = mx / 21.0
+        pts = 0.0
+        notes: list[str] = []
 
-        session_vwap = vwap(inp.bars_1m)[-1]
+        v = vwap(inp.bars_1m)
         price = inp.bars_1m[-1].close
-        checks.append(("vwap_side", sign * (price - session_vwap) > 0))
+        bars5 = resample(inp.bars_1m, 5, drop_partial=True)
+        atr5 = float(np.nan_to_num(atr(bars5, min(14, max(2, len(bars5) - 1)))[-1])) if len(bars5) >= 3 else 0.0
 
-        for label, minutes in (("1m", 1), ("5m", 5), ("15m", 15)):
-            bars = inp.bars_1m if minutes == 1 else resample(inp.bars_1m, minutes)
-            if len(bars) < self._cfg.ema_slow + 2:
-                continue
-            closes = np.array([b.close for b in bars])
-            e_f = ema(closes, self._cfg.ema_fast)[-1]
-            e_s = ema(closes, self._cfg.ema_slow)[-1]
-            checks.append((f"ema_{label}", sign * (e_f - e_s) > 0))
-            if len(bars) >= self._cfg.rsi_period + 2:
-                r = rsi(closes, self._cfg.rsi_period)[-1]
-                lo, hi = (self._cfg.rsi_long_band if inp.direction is Direction.LONG
-                          else self._cfg.rsi_short_band)
-                checks.append((f"rsi_{label}", lo <= r <= hi))
+        # vwap_side (6): price on the right side of session VWAP.
+        side_ok = sign * (price - v[-1]) > 0
+        pts += 6 * scale if side_ok else 0
+        notes.append(f"vwap_side:{'Y' if side_ok else 'N'}")
 
-        bars5 = resample(inp.bars_1m, 5)
-        if len(bars5) >= 2 * self._cfg.adx_period + 1:
-            a = adx(bars5, self._cfg.adx_period)[-1]
-            checks.append(("adx_5m", bool(a >= self._cfg.adx_floor)))
+        # vwap_slope (5): VWAP drifting with the trade over the last 6 bars.
+        slope_ok = False
+        if len(v) >= 7 and atr5 > 0:
+            slope_ok = sign * (v[-1] - v[-7]) > 0.05 * atr5
+        pts += 5 * scale if slope_ok else 0
+        notes.append(f"vwap_slope:{'Y' if slope_ok else 'N'}")
 
-        if not checks:
-            return ScoreComponent("mtf_alignment", 0, mx, "no evaluable checks")
-        frac = sum(ok for _, ok in checks) / len(checks)
-        detail = ", ".join(f"{n}:{'Y' if ok else 'N'}" for n, ok in checks)
-        return ScoreComponent("mtf_alignment", round(mx * frac, 2), mx, detail)
+        # vwap_pullback (4): a recent touch near VWAP that HELD.
+        pull_ok = False
+        if atr5 > 0:
+            for b in inp.bars_1m[-12:]:
+                near = (b.low if sign > 0 else b.high)
+                if abs(near - v[-1]) <= 0.25 * atr5 and sign * (b.close - v[-1]) > 0:
+                    pull_ok = True
+                    break
+        pts += 4 * scale if pull_ok else 0
+        notes.append(f"vwap_pullback:{'Y' if pull_ok else 'N'}")
+
+        # mtf_15m (4): close > EMA9 > EMA21 on closed 15m bars (mirrored short).
+        m15_ok = False
+        bars15 = resample(inp.bars_1m, 15, drop_partial=True)
+        if len(bars15) >= 2:
+            c15 = np.array([b.close for b in bars15])
+            e9, e21 = ema(c15, self._cfg.ema_fast)[-1], ema(c15, self._cfg.ema_slow)[-1]
+            m15_ok = (c15[-1] > e9 > e21) if sign > 0 else (c15[-1] < e9 < e21)
+        pts += 4 * scale if m15_ok else 0
+        notes.append(f"ema_15m:{'Y' if m15_ok else 'N'}")
+
+        # daily (2): needs historical daily bars — honest zero until wired.
+        notes.append("daily:n/a")
+
+        return ScoreComponent("mtf_alignment", round(pts, 2), mx, ", ".join(notes))
 
     def _score_regime(self, inp: ScoringInputs, mx: int) -> ScoreComponent:
+        """Banded per spec §1.2: conf >= 0.85 -> full; 0.70-0.85 -> 12/20; else 0."""
         r = inp.regime
         if inp.direction is None or r.regime is Regime.UNKNOWN:
             return ScoreComponent("regime", 0, mx, f"regime={r.regime.value}")
@@ -180,8 +207,13 @@ class ScoreEngine:
         )
         if not aligned:
             return ScoreComponent("regime", 0, mx, f"{r.regime.value} not aligned")
-        conf = r.confidence if r.confidence >= self._cfg.min_regime_confidence else 0.0
-        return ScoreComponent("regime", round(mx * conf, 2), mx,
+        if r.confidence >= 0.85:
+            pts = float(mx)
+        elif r.confidence >= self._cfg.min_regime_confidence:
+            pts = mx * 12.0 / 20.0
+        else:
+            pts = 0.0
+        return ScoreComponent("regime", round(pts, 2), mx,
                               f"{r.regime.value} conf={r.confidence:.2f} ({r.source})")
 
     def _score_dow_vix(self, inp: ScoringInputs, mx: int, now: datetime) -> ScoreComponent:

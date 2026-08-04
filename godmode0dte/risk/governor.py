@@ -48,9 +48,10 @@ class ApprovedTrade:
 
     trade_id: str
     vertical: VerticalSpec
-    risk_dollars: float
+    risk_dollars: float               # sized at cap_price: the WORST permitted fill
     score: float
     approved_ts: datetime
+    cap_price: float = 0.0            # absolute ladder price cap; broker must not exceed
     _token: object = None
 
     def __post_init__(self) -> None:
@@ -184,21 +185,25 @@ class RiskGovernor:
             return reject(
                 "max_concurrent", f"{len(self.open_positions)} positions already open"
             )
-        # 9. Per-trade sizing (resize down from intent; never up)
+        # 9. Per-trade sizing at the WORST permitted fill, not the mid: the
+        # entry ladder may pay up to cap_price, so risk is computed there
+        # (audit U1 — sizing at mid breaches 4% by construction at full ladder).
+        cap_price = min(intent.vertical.debit * 1.10,
+                        self._cfg.execution.ladder_cap_pct_of_width * intent.vertical.width)
         contracts, risk_dollars = size_trade(
             score=intent.score.total,
             equity=self._equity,
-            debit_per_share=intent.vertical.debit,
+            debit_per_share=cap_price,
             contract_multiplier=100,
             cfg=self._cfg.risk,
         )
         contracts = min(contracts, intent.vertical.contracts)
-        risk_dollars = contracts * intent.vertical.debit * 100
+        risk_dollars = contracts * cap_price * 100
         if contracts < 1:
             return reject("size_zero", "cannot fit one contract under the 4% per-trade cap")
-        # 10. Portfolio heat
+        # 10. Portfolio heat, also at cap_price
         heat_cap = self._equity * (self._cfg.risk.max_heat_pct / 100.0)
-        while contracts >= 1 and self.open_risk_dollars + contracts * intent.vertical.debit * 100 > heat_cap:
+        while contracts >= 1 and self.open_risk_dollars + contracts * cap_price * 100 > heat_cap:
             contracts -= 1
         if contracts < 1:
             return reject(
@@ -206,7 +211,7 @@ class RiskGovernor:
                 f"open risk {self.open_risk_dollars:.0f} + new trade would breach "
                 f"{self._cfg.risk.max_heat_pct}% heat cap",
             )
-        risk_dollars = contracts * intent.vertical.debit * 100
+        risk_dollars = contracts * cap_price * 100
 
         vertical = VerticalSpec(
             underlying=intent.vertical.underlying,
@@ -226,6 +231,7 @@ class RiskGovernor:
             risk_dollars=risk_dollars,
             score=intent.score.total,
             approved_ts=now,
+            cap_price=cap_price,
             _token=_APPROVAL_TOKEN,
         )
         self._last_approval_ts = now

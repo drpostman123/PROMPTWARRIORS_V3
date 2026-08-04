@@ -451,3 +451,26 @@ fallback (graduated banding via config), not the cumulative-volume ratio.
 per-weekday adjustment activation, threshold recalibration, OPEX RVOL floor,
 and the SPY→SPX escalation rule are documented procedures gated on the logged
 decision/trade history in `state/`.
+
+## Audit Round 2 (applied)
+
+A second 11-agent loop audited the implementation itself (5 domain auditors
+reading the code → adversarial cross-examination → lead-engineer synthesis).
+Confirmed and fixed: equity-fetch failure no longer disables exits (breaker
+trips after ~30s of dead feed with positions open); all runtime tasks are
+supervised with a fatal-crash flatten path; entry/exit cancel-vs-fill races
+resolve order status to terminal before proceeding (an unconfirmed cancel gets
+no replacement rung); boot now ADOPTS pairable live positions instead of
+abandoning them under lockout; the −6% baseline persists across restarts;
+marks no longer freeze on zero-bid short legs and stops fire on 0.00 marks
+but never on stale ones; DXLink loops reconnect with full resubscription.
+Upgrades: sizing at the worst permitted fill (cap_price) with a broker-side
+assert; session-anchored bars everywhere; spec §4.2 regime rules (fixed 0.85
+probabilities, 4-bar warmup) plus the ADX warmup-seed fix; chase gate,
+breakout freshness decay, no-free-points MTF scoring; SPXW-only SPX chains,
+tick snapping, between-rung re-quoting, combo-spread gate, depth-clamped
+sizing; dashboard staleness banner + autorefresh; MAE/MFE and full score
+context logged per trade. Killed in debate: ApprovedTrade forgery hardening
+(no boundary exists inside one interpreter — the broker-reference control is
+the real wall), HMM rewrite (dead code until v2 is scheduled), and the
+backtest HAC-SE fix (offline-only; required before any weight promotion).

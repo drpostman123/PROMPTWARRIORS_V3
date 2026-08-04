@@ -10,14 +10,20 @@ trade log with cumulative P&L.
 from __future__ import annotations
 
 import json
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-SNAPSHOT = Path("state/snapshot.json")
-TRADES = Path("state/trades.jsonl")
+try:
+    from godmode0dte.config import load_config
+    _cfg = load_config().data
+    SNAPSHOT, TRADES = Path(_cfg.snapshot_path), Path(_cfg.trade_log_path)
+except Exception:                                     # config unreadable: fall back
+    SNAPSHOT, TRADES = Path("state/snapshot.json"), Path("state/trades.jsonl")
 
 # Reference palette (validated): status colors are reserved for state,
 # sequential blue carries magnitude, ink/grid tones stay recessive.
@@ -60,6 +66,19 @@ st.title("GodMode0DTE")
 if not snap:
     st.info("Waiting for the runtime to write state/snapshot.json — start it with `godmode`.")
     st.stop()
+
+# Runtime heartbeat: the snapshot rewrites every 2s — silence means the
+# dashboard is showing a corpse, and that must be unmistakable.
+snap_age = None
+if snap.get("ts"):
+    try:
+        snap_age = (datetime.now(timezone.utc)
+                    - datetime.fromisoformat(snap["ts"])).total_seconds()
+    except ValueError:
+        pass
+if snap_age is not None and snap_age > 10:
+    st.error(f"⚠️ RUNTIME STALE — snapshot is {snap_age:.0f}s old. "
+             "Nothing below is live.", icon="⚠️")
 
 mode = "PAPER" if snap.get("paper_mode", True) else "LIVE"
 breaker = snap.get("breaker", "armed")
@@ -199,6 +218,6 @@ if not trades.empty:
 else:
     st.caption("No trades logged yet.")
 
-st.caption("Auto-refresh: use the ⋮ menu → rerun, or run with "
-           "`streamlit run ... --server.runOnSave true`; the runtime rewrites the "
-           "snapshot every 2 s.")
+st.caption("Auto-refreshing every 2 s (the runtime rewrites the snapshot on the same cadence).")
+time.sleep(2)
+st.rerun()

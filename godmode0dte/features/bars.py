@@ -45,22 +45,31 @@ class BarAggregator:
                    close=c["close"], volume=c["volume"])
 
 
-def resample(bars: list[Bar], minutes: int) -> list[Bar]:
-    """Resample 1-minute bars to a higher timeframe. Partial last bucket included."""
+def resample(bars: list[Bar], minutes: int, drop_partial: bool = False) -> list[Bar]:
+    """Resample 1-minute bars to a higher timeframe.
+
+    Buckets are anchored to clock boundaries (10:00, 10:05, ...) rather than
+    the first bar's timestamp, so a mid-bucket boot cannot shift every
+    subsequent bar (audit U2). ``drop_partial=True`` excludes the live,
+    still-forming last bucket — indicator callers want closed bars only.
+    """
     if not bars:
         return []
     out: list[Bar] = []
     bucket: list[Bar] = []
     span = timedelta(minutes=minutes)
-    start = bars[0].ts
+    first = bars[0].ts
+    start = first - timedelta(minutes=first.minute % minutes,
+                              seconds=first.second, microseconds=first.microsecond)
     for b in bars:
         if b.ts >= start + span:
-            out.append(_merge(bucket))
+            if bucket:
+                out.append(_merge(bucket))
             while b.ts >= start + span:
                 start += span
             bucket = []
         bucket.append(b)
-    if bucket:
+    if bucket and not drop_partial:
         out.append(_merge(bucket))
     return out
 

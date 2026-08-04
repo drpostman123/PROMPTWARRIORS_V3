@@ -88,14 +88,16 @@ class SignalConfig(BaseModel):
     # Opening range (09:30-09:35 ET)
     or_start: time = time(9, 30)
     or_end: time = time(9, 35)
-    or_min_width_pct: float = Field(0.05, description="OR width as % of price, lower bound.")
+    or_min_width_pct: float = Field(0.07, description="OR width as % of price, lower bound.")
     or_max_width_pct: float = Field(0.35, description="OR width as % of price, upper bound.")
     or_max_width_atr_mult: float = Field(1.20, description="OR width must be <= this x 5m ATR(14).")
 
-    # Breakout confirmation
-    breakout_buffer_pct: float = Field(0.02, description="Close must clear OR edge by this % of price.")
+    # Breakout confirmation (audit round 2: tightened; chase gate + decay added)
+    breakout_buffer_pct: float = Field(0.03, description="Close must clear OR edge by this % of price.")
     min_rel_volume: float = Field(1.30, description="5m volume vs 20-day same-slot average.")
-    min_close_location: float = Field(0.70, description="Close location value within breakout bar.")
+    min_close_location: float = Field(0.75, description="Close location value within breakout bar.")
+    max_chase_frac: float = Field(0.50, description="G-S4: reject if close extends past the OR edge by more than this x OR width.")
+    breakout_decay_min: float = Field(30.0, description="Breakout points decay linearly to 0 over this many minutes.")
 
     # Multi-timeframe alignment
     ema_fast: int = 9
@@ -157,6 +159,10 @@ class ExecutionConfig(BaseModel):
     max_leg_spread_abs: float = Field(0.05, description="Per-leg absolute bid-ask limit (SPY; SPX uses x12).")
     min_open_interest: int = 500
     quote_staleness_sec: float = 1.5
+    max_combo_spread_spy: float = Field(0.08, description="Combined vertical spread gate (spec §6.3).")
+    max_combo_spread_spx: float = Field(1.00, description="Combined vertical spread gate, SPX scale.")
+    max_contracts_ceiling: int = Field(50, description="Fat-finger ceiling (SPY; SPX uses 5).")
+    intent_max_age_sec: float = Field(90.0, description="Abandon entry when the intent is older than this.")
 
     # Entry ladder: start at mid, walk toward ask in steps.
     ladder_start_frac: float = Field(0.50, description="0.5 = start at mid of natural/mid range.")

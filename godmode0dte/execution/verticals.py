@@ -92,6 +92,14 @@ def build_vertical(
         if not ok_l or not ok_s:
             log.info("leg_liquidity_reject", long=why_l, short=why_s, strike=long_opt.strike)
             continue
+        # Combined vertical spread gate (spec §6.3): the cost of crossing the
+        # combo, not just each leg.
+        combo_spread = (lq.ask - sq.bid) - (lq.bid - sq.ask)
+        combo_max = cfg.max_combo_spread_spy if underlying == "SPY" else cfg.max_combo_spread_spx
+        if combo_spread > combo_max:
+            log.info("combo_spread_reject", combo_spread=round(combo_spread, 2),
+                     limit=combo_max, strike=long_opt.strike)
+            continue
         debit = round(lq.mid - sq.mid, 2)
         debit_pct = debit / width
         if debit_pct < cfg.min_debit_pct_of_width:

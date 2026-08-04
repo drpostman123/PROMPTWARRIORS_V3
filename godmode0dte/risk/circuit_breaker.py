@@ -40,15 +40,35 @@ class CircuitBreaker:
         self._starting_equity: Optional[float] = None
         self._trip_reason: str = ""
         self._lockout_path = Path(cfg.lockout_file)
+        self._baseline_path = self._lockout_path.with_name("baseline.json")
         self._restore_lockout()
+        self._restore_baseline()
 
     # -- lifecycle -----------------------------------------------------
 
     def set_starting_equity(self, equity: float) -> None:
-        """Record starting-day equity once, at session open."""
+        """Record starting-day equity once per SESSION DAY, persisted to disk.
+
+        Without persistence a mid-day restart re-anchors the -6% limit to
+        depleted equity, allowing ~-11% cumulative before tripping (audit B6).
+        """
         if self._starting_equity is None:
             self._starting_equity = equity
+            self._baseline_path.parent.mkdir(parents=True, exist_ok=True)
+            self._baseline_path.write_text(json.dumps(
+                {"date": self._session_date.isoformat(), "starting_equity": equity}))
             log.info("breaker_armed", starting_equity=equity, limit_pct=self._cfg.daily_loss_limit_pct)
+
+    def _restore_baseline(self) -> None:
+        if not self._baseline_path.exists():
+            return
+        try:
+            payload = json.loads(self._baseline_path.read_text())
+            if payload.get("date") == self._session_date.isoformat():
+                self._starting_equity = float(payload["starting_equity"])
+                log.info("breaker_baseline_restored", starting_equity=self._starting_equity)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+            log.error("breaker_baseline_unreadable")
 
     def check(self, current_equity: float) -> BreakerState:
         """Evaluate the daily loss limit. Called on every equity update."""

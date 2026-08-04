@@ -70,7 +70,13 @@ def adx(bars: list[Bar], period: int = 14) -> np.ndarray:
     plus_di = 100.0 * _wilder(plus_dm, period) / np.where(tr_s == 0, np.nan, tr_s)
     minus_di = 100.0 * _wilder(minus_dm, period) / np.where(tr_s == 0, np.nan, tr_s)
     dx = 100.0 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, np.nan, plus_di + minus_di)
-    return _wilder(np.nan_to_num(dx), period)
+    # Seed the second Wilder pass at the first VALID DX index — averaging the
+    # warmup NaNs as zeros depressed ADX for the whole morning (audit U3).
+    first_valid = period - 1
+    out = np.full(n, np.nan)
+    valid = _wilder(dx[first_valid:], period)
+    out[first_valid:] = valid
+    return out
 
 
 def vwap(bars: list[Bar]) -> np.ndarray:
