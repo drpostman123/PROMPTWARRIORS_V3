@@ -107,7 +107,10 @@ class PaperBroker(Broker):
         approved = self._open.pop(trade_id, None)
         if approved is not None:
             entry = self._entry_fills.pop(trade_id, price)
+            # Paper charges real friction — fee-blind paper results overstate
+            # the edge exactly where it is thinnest.
             self._equity += (price - entry) * approved.vertical.contracts * 100
+            self._equity -= self._cfg.friction_per_contract * approved.vertical.contracts
         log.info("paper_exit_filled", trade_id=trade_id, price=price, urgency=urgency)
         return Fill(trade_id, max(price, 0.0), datetime.now(timezone.utc))
 

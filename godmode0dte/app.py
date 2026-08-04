@@ -530,8 +530,10 @@ class GodModeApp:
         self.governor.update_position(closed)
         lo, hi = self._extremes.pop(trade_id, (pos.entry_debit, pos.entry_debit))
         mult = pos.vertical.contracts * 100
+        fees = round(self.cfg.execution.friction_per_contract * pos.vertical.contracts, 2)
         self.store.log_trade({"kind": "exit", "trade_id": trade_id, "reason": reason,
                               "detail": detail, "fill": fill.price, "pnl": closed.pnl,
+                              "fees": fees, "pnl_net": round(closed.pnl - fees, 2),
                               "mae": round((lo - pos.entry_debit) * mult, 2),
                               "mfe": round((hi - pos.entry_debit) * mult, 2),
                               "heat_before_pct": heat_before,

@@ -163,6 +163,11 @@ class ExecutionConfig(BaseModel):
     max_combo_spread_spx: float = Field(1.00, description="Combined vertical spread gate, SPX scale.")
     max_contracts_ceiling: int = Field(50, description="Fat-finger ceiling (SPY; SPX uses 5).")
     intent_max_age_sec: float = Field(90.0, description="Abandon entry when the intent is older than this.")
+    # Cost is the one variable you fully control: friction per contract for a
+    # full round trip (2 legs open + 2 legs close: commissions + clearing +
+    # regulatory). Logged on every trade and charged in paper mode so paper
+    # results are never fee-blind. SPX index options run higher — set it.
+    friction_per_contract: float = Field(2.60, ge=0)
 
     # Entry ladder: start at mid, walk toward ask in steps.
     ladder_start_frac: float = Field(0.50, description="0.5 = start at mid of natural/mid range.")

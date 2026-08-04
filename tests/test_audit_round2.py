@@ -145,6 +145,20 @@ def test_regime_range_when_flat():
     assert state.regime is Regime.RANGE
 
 
+# ---- Kelly math (edge_report) ----------------------------------------------
+
+def test_kelly_fraction():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from edge_report import kelly_fraction
+    # 60% hit rate, 1:1 payoff -> f* = 0.2; no edge -> 0; negative edge -> < 0
+    assert kelly_fraction(0.60, 1.0) == pytest.approx(0.20)
+    assert kelly_fraction(0.50, 1.0) == pytest.approx(0.0)
+    assert kelly_fraction(0.40, 1.0) < 0
+    assert kelly_fraction(0.5, 0.0) == 0.0
+
+
 # ---- U5b: tick snapping ----------------------------------------------------
 
 def test_snap_tick_directions():

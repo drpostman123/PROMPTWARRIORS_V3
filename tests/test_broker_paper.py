@@ -35,4 +35,6 @@ async def test_paper_round_trip_updates_equity(cfg, governor: RiskGovernor):
                                             q(2.8), q(1.2), urgency="normal")
     assert exit_fill is not None
     pnl = (exit_fill.price - fill.price) * approved.vertical.contracts * 100
-    assert await broker.equity() == pytest.approx(100_000 + pnl)
+    fees = ExecutionConfig().friction_per_contract * approved.vertical.contracts
+    # Paper equity is net of friction — fee-blind paper would flatter the edge.
+    assert await broker.equity() == pytest.approx(100_000 + pnl - fees)
