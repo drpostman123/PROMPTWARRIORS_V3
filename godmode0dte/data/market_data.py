@@ -33,6 +33,8 @@ class MarketDataHub:
         self.bars = BarAggregator(seconds=cfg.data.bar_seconds)
         self.macro = MacroCluster()
         self.quotes: dict[str, Quote] = {}
+        self.deltas: dict[str, float] = {}          # streamer symbol -> delta
+        self.open_interest: dict[str, int] = {}     # streamer symbol -> OI
         self._option_symbols: set[str] = set()
         self._streamer = None
         self._session = None
@@ -53,6 +55,8 @@ class MarketDataHub:
         self._tasks = [
             asyncio.create_task(self._quote_loop(), name="md-quotes"),
             asyncio.create_task(self._trade_loop(), name="md-trades"),
+            asyncio.create_task(self._greeks_loop(), name="md-greeks"),
+            asyncio.create_task(self._summary_loop(), name="md-summary"),
         ]
         log.info("market_data_started", underlying=self.underlying, macro=macro_syms)
 
@@ -63,12 +67,14 @@ class MarketDataHub:
             await self._streamer.close()
 
     async def watch_options(self, streamer_symbols: list[str]) -> None:
-        """Subscribe option legs (DXFeed streamer symbols)."""
-        from tastytrade.dxfeed import Quote as DXQuote
+        """Subscribe option legs (DXFeed streamer symbols): quotes, greeks, OI."""
+        from tastytrade.dxfeed import Greeks as DXGreeks, Quote as DXQuote, Summary as DXSummary
         new = [s for s in streamer_symbols if s not in self._option_symbols]
         if new and self._streamer is not None:
             self._option_symbols.update(new)
             await self._streamer.subscribe(DXQuote, new)
+            await self._streamer.subscribe(DXGreeks, new)
+            await self._streamer.subscribe(DXSummary, new)
 
     # -- consumers -----------------------------------------------------
 
@@ -92,6 +98,18 @@ class MarketDataHub:
         async for t in self._streamer.listen(DXTrade):
             if t.event_symbol == self.underlying and t.price:
                 self.bars.add(float(t.price), float(t.size or 0), datetime.now(timezone.utc))
+
+    async def _greeks_loop(self) -> None:
+        from tastytrade.dxfeed import Greeks as DXGreeks
+        async for g in self._streamer.listen(DXGreeks):
+            if g.delta is not None:
+                self.deltas[g.event_symbol] = float(g.delta)
+
+    async def _summary_loop(self) -> None:
+        from tastytrade.dxfeed import Summary as DXSummary
+        async for s in self._streamer.listen(DXSummary):
+            if s.open_interest is not None:
+                self.open_interest[s.event_symbol] = int(s.open_interest)
 
     # -- freshness -----------------------------------------------------
 

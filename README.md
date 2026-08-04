@@ -5,14 +5,17 @@ Debit verticals on SPY/SPX only. Most days it takes **zero trades** — it fires
 only when a transparent multi-factor Setup Score reaches **93/100**, and every
 trade passes a risk governor that the signal engine cannot bypass.
 
-> ⚠️ **Safety first.** This software ships in **paper mode** and should stay
-> there until you have weeks of logged paper decisions and a calibrated score
-> threshold. 0DTE options are among the highest-risk instruments retail traders
-> can touch: theta and gamma move violently, and a defined-risk debit vertical
-> can and regularly does go to zero. **No configuration of this system — or any
-> system — guarantees profits.** The "GodMode" name refers to the selectivity
-> bar, not to any promise about outcomes. Never trade money you cannot afford
-> to lose entirely.
+> ⚠️ **Safety.** This configuration ships in **live production mode** (armed by
+> the `GODMODE_CONFIRM_LIVE=YES` interlock below). 0DTE options are among the
+> highest-risk instruments retail traders can touch: theta and gamma move
+> violently, and a defined-risk debit vertical can and regularly does go to
+> zero. **No configuration of this system — or any system — guarantees
+> profits.** The "GodMode" name refers to the selectivity bar, not to any
+> promise about outcomes. The hard caps below are what make live operation
+> survivable — they cannot be loosened from config. Never trade money you
+> cannot afford to lose entirely. Paper mode remains available
+> (`paper_mode: true`) and is the recommended way to validate any parameter
+> change before it touches real money.
 
 ## Hard constraints (enforced in code, not just config)
 
@@ -27,7 +30,8 @@ trade passes a risk governor that the signal engine cannot bypass.
 
 The YAML config can **tighten** these numbers but pydantic validators reject any
 attempt to loosen them. Live mode requires *both* `paper_mode: false` in YAML
-*and* the `GODMODE_CONFIRM_LIVE=YES` environment variable.
+(the shipped default) *and* the `GODMODE_CONFIRM_LIVE=YES` environment variable —
+an arming switch so a copied config can never fire real orders by accident.
 
 ### Why the signal engine cannot bypass risk
 
@@ -99,10 +103,11 @@ pip install -e ".[dev]"            # add ,hmm for the HMM regime model
 
 export TASTYTRADE_USERNAME="you"
 export TASTYTRADE_PASSWORD="…"      # env vars only — never in YAML
+export GODMODE_CONFIRM_LIVE=YES     # arming switch for live mode (shipped default)
 
-pytest                              # 29 tests must pass before first run
+pytest                              # all tests must pass before first run
 
-# Terminal 1 — the runtime (paper mode by default):
+# Terminal 1 — the runtime (LIVE by default; set paper_mode: true to simulate):
 godmode --config config/config.yaml
 
 # Terminal 2 — the dashboard:
@@ -112,14 +117,20 @@ streamlit run godmode0dte/dashboard/app.py
 `config/econ_calendar.yaml` is operator-maintained: add CPI/FOMC/NFP rows and
 any headline-risk days (all-day lockout or directional-bias-only).
 
-## Paper → live checklist
+## Live-operation notes
 
-1. ≥ 4 weeks of paper trading with the decision log accumulating.
-2. Verify score calibration: bucket logged scores (93–95, 95–97, 97+) and check
-   hit-rate monotonicity from `state/decisions.jsonl` / `state/trades.jsonl`.
-3. Volume baseline warmed up (20 sessions in `state/volume_profile.json`).
-4. Only then: `paper_mode: false` **and** `GODMODE_CONFIRM_LIVE=YES`, with the
-   smallest ladder (tighten `sizing_ladder` in YAML — config may always tighten).
+- **Restart behavior**: booting live with unrecognized open positions engages
+  the kill switch (fail-flat) — the system will not blindly adopt risk it
+  cannot attribute. Clear or close positions manually, then restart.
+- **Volume baseline**: relative volume needs ~20 sessions of history in
+  `state/volume_profile.json`; until then it falls back to session medians and
+  the breakout component rarely maxes out (fewer trades, not worse ones).
+- **Calibration governance** (from the quant debate): keep the 93 threshold
+  fixed until ≥ 200 logged score outcomes exist with ≥ 30 per band and the
+  93–95 / 95–97 / 97+ hit-rates are monotonic in
+  `state/decisions.jsonl` / `state/trades.jsonl`.
+- **Parameter changes**: validate any signal/exit change in `paper_mode: true`
+  before it touches real money; risk caps can only be tightened.
 
 ## Design provenance
 

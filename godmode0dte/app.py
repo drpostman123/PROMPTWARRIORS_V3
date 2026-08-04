@@ -123,7 +123,7 @@ class GodModeApp:
             ):
                 rows.append(ChainOption(symbol=occ, streamer_symbol=streamer,
                                         strike=float(strike.strike_price), is_call=is_call,
-                                        delta=None, open_interest=10**6))
+                                        delta=None, open_interest=0))
                 symbols.append(streamer)
         self.chain = rows
         await self.md.watch_options(symbols)
@@ -193,7 +193,14 @@ class GodModeApp:
 
         build: Optional[BuildResult] = None
         if direction is not None:
-            build = build_vertical(direction, self.underlying, self.chain,
+            live_chain = [
+                ChainOption(symbol=o.symbol, streamer_symbol=o.streamer_symbol,
+                            strike=o.strike, is_call=o.is_call,
+                            delta=self.md.deltas.get(o.streamer_symbol),
+                            open_interest=self.md.open_interest.get(o.streamer_symbol, 0))
+                for o in self.chain
+            ]
+            build = build_vertical(direction, self.underlying, live_chain,
                                    self.md.quotes, self.cfg.execution,
                                    datetime.now(self.tz).date())
 
@@ -331,7 +338,7 @@ class GodModeApp:
         if lq is None or sq is None:
             log.error("exit_no_quotes", trade_id=trade_id)
             return
-        fill = await self.broker.close_position(trade_id, lq, sq, urgency)
+        fill = await self.broker.close_position(trade_id, pos.vertical, lq, sq, urgency)
         if fill is None:
             log.error("exit_unfilled_retrying", trade_id=trade_id, reason=reason)
             return

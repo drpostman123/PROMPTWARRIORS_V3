@@ -2,7 +2,7 @@
 # Hard risk ceilings are enforced in code (config can tighten, never loosen):
 #   per-trade <= 4% equity, heat <= 7%, <= 2 positions, daily loss <= 6%.
 
-paper_mode: true            # live also requires GODMODE_CONFIRM_LIVE=YES env var
+paper_mode: false           # LIVE. Arming interlock: also export GODMODE_CONFIRM_LIVE=YES
 account_index: 0
 timezone: America/New_York
 

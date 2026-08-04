@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from godmode0dte.config import ExecutionConfig
-from godmode0dte.models import Quote
+from godmode0dte.models import Quote, VerticalSpec
 from godmode0dte.monitoring.logging import get_logger
 from godmode0dte.risk.governor import ApprovedTrade
 
@@ -44,7 +44,8 @@ class Broker(ABC):
         """Enter the vertical with a laddered limit order. None = unfilled/abandoned."""
 
     @abstractmethod
-    async def close_position(self, trade_id: str, long_q: Quote, short_q: Quote,
+    async def close_position(self, trade_id: str, vertical: VerticalSpec,
+                             long_q: Quote, short_q: Quote,
                              urgency: str = "normal") -> Optional[Fill]:
         """Exit the vertical. 'urgent' ladders faster and further."""
 
@@ -80,7 +81,8 @@ class PaperBroker(Broker):
                  contracts=approved.vertical.contracts)
         return Fill(approved.trade_id, price, datetime.now(timezone.utc))
 
-    async def close_position(self, trade_id: str, long_q: Quote, short_q: Quote,
+    async def close_position(self, trade_id: str, vertical: VerticalSpec,
+                             long_q: Quote, short_q: Quote,
                              urgency: str = "normal") -> Optional[Fill]:
         natural_mid = long_q.mid - short_q.mid
         natural_bid = long_q.bid - short_q.ask
@@ -157,13 +159,55 @@ class TastytradeBroker(Broker):
         log.warning("entry_abandoned", trade_id=approved.trade_id)
         return None
 
-    async def close_position(self, trade_id: str, long_q: Quote, short_q: Quote,
+    async def close_position(self, trade_id: str, vertical: VerticalSpec,
+                             long_q: Quote, short_q: Quote,
                              urgency: str = "normal") -> Optional[Fill]:
-        # Symmetric to entry: BUY_TO_CLOSE/SELL_TO_CLOSE, ladder from mid toward the bid,
-        # twice the step size and half the wait when urgency == "urgent".
-        raise NotImplementedError(
-            "Wire with the position's stored legs; kept abstract until live-mode certification."
-        )
+        """Close the vertical for a credit: SELL_TO_CLOSE long, BUY_TO_CLOSE short.
+
+        Ladders from the mid credit toward the natural (bid-side) credit.
+        'urgent' doubles the step size, halves the wait, and adds one final
+        step a tick through the natural so breaker/force-flat exits always
+        clear. Returns None if still unfilled — the risk task retries.
+        """
+        from decimal import Decimal
+        from tastytrade.instruments import Option
+        from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType
+
+        long_opt = await Option.a_get(self._session, vertical.long_symbol)
+        short_opt = await Option.a_get(self._session, vertical.short_symbol)
+        mid_credit = long_q.mid - short_q.mid
+        natural_credit = long_q.bid - short_q.ask
+        step_frac = self._cfg.ladder_step_frac * (2 if urgency == "urgent" else 1)
+        wait = self._cfg.ladder_step_wait_sec / (2 if urgency == "urgent" else 1)
+        steps = list(range(self._cfg.ladder_max_steps + 1))
+
+        for step in steps:
+            px = mid_credit - (mid_credit - natural_credit) * min(1.0, step * step_frac)
+            if urgency == "urgent" and step == steps[-1]:
+                px = natural_credit - 0.05          # through the market: get out, now
+            px = round(max(px, 0.0), 2)
+            order = NewOrder(
+                time_in_force=OrderTimeInForce.DAY,
+                order_type=OrderType.LIMIT,
+                legs=[
+                    long_opt.build_leg(Decimal(vertical.contracts), OrderAction.SELL_TO_CLOSE),
+                    short_opt.build_leg(Decimal(vertical.contracts), OrderAction.BUY_TO_CLOSE),
+                ],
+                price=Decimal(str(px)),             # credit orders use positive price
+            )
+            resp = await self._account.a_place_order(self._session, order, dry_run=False)
+            placed = resp.order
+            if await self._await_fill(placed, wait):
+                log.info("exit_filled", trade_id=trade_id, price=px, step=step, urgency=urgency)
+                return Fill(trade_id, px, datetime.now(timezone.utc))
+            try:
+                await self._account.a_delete_order(self._session, placed.id)
+            except Exception as e:                  # noqa: BLE001 — may already be filled
+                log.warning("exit_cancel_failed", trade_id=trade_id, error=str(e))
+                if await self._await_fill(placed, 2.0):
+                    return Fill(trade_id, px, datetime.now(timezone.utc))
+        log.error("exit_ladder_exhausted", trade_id=trade_id, urgency=urgency)
+        return None
 
     async def _await_fill(self, placed_order, wait_sec: float) -> bool:
         from tastytrade.order import OrderStatus
