@@ -78,5 +78,13 @@ def test_logistic_slope_recovers_planted_edge():
         i = float(rng.uniform(-0.6, 0.6))
         up = rng.random() < 1 / (1 + np.exp(-(0.0 + 3.0 * i)))   # planted b = 3
         rows.append((i, 0.1 if up else -0.1, False))
-    b, z = logistic_slope(rows)
-    assert b > 1.5 and z > 3.0
+    # independent draws: horizon 1 at 1-min spacing means L=0, so the HAC
+    # sandwich reduces to Huber-White, which should sit close to the naive
+    # model-based SE when the model is correctly specified
+    b, z_naive, z_hac, n_eff = logistic_slope(rows, horizon_min=1)
+    assert b > 1.5 and z_hac > 3.0
+    assert abs(z_hac - z_naive) / z_naive < 0.10 and n_eff == 600
+    # overlapping horizon (L=4) on the same iid rows: HAC z stays finite and
+    # n_eff shrinks by the overlap factor
+    _, _, z5, n_eff5 = logistic_slope(rows, horizon_min=5)
+    assert n_eff5 == 120

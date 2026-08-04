@@ -73,16 +73,42 @@ class RiskGovernor:
         self._last_approval_ts: Optional[datetime] = None
         self._equity: float = 0.0
         self._equity_ts: Optional[datetime] = None
+        self._pending_equity: Optional[tuple[float, int]] = None
         self._kill_switch = False
 
     # -- account state (fed by the runtime, from the broker) -----------
 
     def update_equity(self, equity: float, ts: datetime) -> BreakerState:
-        """Update live equity; runs the breaker check on every update."""
-        if equity > 0:
-            self._equity = equity
-            self._equity_ts = ts
-            self._breaker.set_starting_equity(equity)
+        """Update live equity; runs the breaker check on every update.
+
+        Plausibility gate (audit R3 #6a): a wrong-but-positive API print (10x
+        glitch) must not size 10x or corrupt the drawdown math. A reading
+        deviating >20% from the last accepted one is quarantined until 3
+        consecutive consistent readings confirm it. The day's FIRST reading is
+        cross-checked against the persisted baseline (>30% off -> not armed).
+        """
+        if equity <= 0:
+            return self._breaker.check(self._equity)
+        if self._equity > 0 and abs(equity - self._equity) / self._equity > 0.20:
+            pending_val, pending_n = self._pending_equity or (0.0, 0)
+            if pending_val > 0 and abs(equity - pending_val) / pending_val <= 0.05:
+                pending_n += 1
+            else:
+                pending_val, pending_n = equity, 1
+            self._pending_equity = (pending_val, pending_n)
+            if pending_n < 3:
+                log.warning("equity_implausible_quarantined", reading=equity,
+                            accepted=self._equity, consecutive=pending_n)
+                return self._breaker.check(self._equity)
+            log.warning("equity_jump_confirmed", reading=equity, accepted=self._equity)
+        baseline = self._breaker.starting_equity
+        if self._equity == 0 and baseline and abs(equity - baseline) / baseline > 0.30:
+            log.error("first_equity_far_from_baseline", reading=equity, baseline=baseline)
+            return self._breaker.check(0.0)          # equity stays unarmed -> equity_stale rejects
+        self._pending_equity = None
+        self._equity = equity
+        self._equity_ts = ts
+        self._breaker.set_starting_equity(equity)
         return self._breaker.check(self._equity)
 
     def register_position(self, pos: Position) -> None:
@@ -127,6 +153,10 @@ class RiskGovernor:
     @property
     def max_heat_pct(self) -> float:
         return self._cfg.risk.max_heat_pct
+
+    @property
+    def killed(self) -> bool:
+        return self._kill_switch
 
     @property
     def must_flatten(self) -> bool:

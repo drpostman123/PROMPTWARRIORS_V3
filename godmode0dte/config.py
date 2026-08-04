@@ -12,7 +12,7 @@ concurrency to <= 2, daily loss limit to <= 6%.
 from __future__ import annotations
 
 import os
-from datetime import time
+from datetime import date, time
 from pathlib import Path
 from typing import Literal
 
@@ -187,6 +187,10 @@ class ExitConfig(BaseModel):
     stale_flush: time = time(14, 50)
     force_flat: time = time(15, 30)
     structure_stop: bool = Field(True, description="P4b: close through OR trigger with P&L < +10% of debit.")
+    # NYSE early-close days (13:00 ET). On these dates the runtime shifts
+    # force_flat to 12:30 and stale_flush to 11:50 at boot (spec: half-day
+    # rule) — a 15:30 flatten after a 13:00 close is a flatten that never runs.
+    early_close_dates: list[date] = Field(default_factory=list)
 
 
 class DataConfig(BaseModel):

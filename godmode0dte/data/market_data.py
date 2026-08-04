@@ -70,6 +70,12 @@ class MarketDataHub:
         from tastytrade.dxfeed import Greeks as DXGreeks, Quote as DXQuote, Summary as DXSummary
         from tastytrade.dxfeed import Trade as DXTrade
 
+        old, self._streamer = self._streamer, None
+        if old is not None:
+            try:
+                await old.close()                    # audit R3 #6d: no socket leak per reconnect
+            except Exception:                        # noqa: BLE001
+                pass
         self._streamer = await DXLinkStreamer(self._session)
         macro_syms = list(self._cfg.data.macro_symbols.values())
         await self._streamer.subscribe(DXQuote, [self.underlying, *macro_syms])

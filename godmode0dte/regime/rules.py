@@ -32,11 +32,15 @@ class RuleBasedRegime(RegimeModel):
 
     def classify(self, bars_5m: list[Bar], vix: float | None) -> RegimeState:
         vol = self._vol_regime(vix)
-        if len(bars_5m) < 4:
+        # 15-bar floor (audit R3 #6f): ATR(3) at 09:50 miscalibrates every
+        # ATR-normalized feature. Until daily-ATR plumbing lands (deferred),
+        # a real ATR14 needs 15 closed 5m bars — regime (and therefore entries)
+        # arms ~10:45. Safety over opportunity.
+        if len(bars_5m) < 15:
             return RegimeState(Regime.UNKNOWN, vol, confidence=0.0, source="rules")
 
         closes = np.array([b.close for b in bars_5m])
-        atr_now = float(np.nan_to_num(atr(bars_5m, min(14, len(bars_5m) - 1))[-1]))
+        atr_now = float(np.nan_to_num(atr(bars_5m, 14)[-1]))
         if atr_now <= 0:
             return RegimeState(Regime.UNKNOWN, vol, confidence=0.0, source="rules")
 

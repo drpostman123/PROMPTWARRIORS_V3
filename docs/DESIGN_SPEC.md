@@ -474,3 +474,46 @@ context logged per trade. Killed in debate: ApprovedTrade forgery hardening
 (no boundary exists inside one interpreter — the broker-reference control is
 the real wall), HMM rewrite (dead code until v2 is scheduled), and the
 backtest HAC-SE fix (offline-only; required before any weight promotion).
+
+## Audit Round 3 (applied)
+
+A third 11-agent loop (regression hunter, red-team scenario walker, quant
+verifier, ops engineer, test engineer → cross-examination → lead synthesis)
+audited the round-2 patches themselves and closed the deferred debt.
+
+Critical catches: the round-2 regime rewrite was wired with the ADX floor
+(20.0) as its EMA-slope threshold — TREND was unreachable and the system
+could structurally never score 93 (one-line fix, regression-tested through
+the app constructor); the order-lifecycle "gone" verdict could re-ladder
+over a same-day filled-and-dropped order — placement now remembers every
+unresolved order id and refuses new placements until terminal status
+resolves, "filled" is only ever declared by leg-quantity DELTA, and every
+rung is wrapped so a poll exception cannot strand a working DAY order; boot
+now sweeps working orders (SIGKILL mid-ladder) and skips non-option /
+flat / other-underlying rows instead of letting one equity share persist a
+full-day lockout.
+
+High: entry ladders take an abort hook (breaker trip mid-ladder cancels
+instead of chasing); exit ladders re-quote per rung with staleness walls —
+urgent exits on a stale book place a floor-credit limit (never a market
+order, never $0); half-day sessions shift force-flat to 12:30 via
+config early_close_dates and skip the rel-volume baseline update.
+
+Mediums: equity plausibility gate (>20% jumps quarantined until 3
+consistent readings; first-of-day cross-checked vs persisted baseline);
+crash-flatten runs even if lockout persistence fails; never-marked
+positions escalate like frozen marks; reconnect closes the old streamer;
+paper broker enforces cap_price + tick snap + the money assert; regime
+requires a real ATR14 (15 closed 5m bars — entries arm ~10:45 until
+daily-ATR plumbing lands); 15m EMAs SMA-seed only at full period; VWAP
+pullback compares each bar to VWAP as-of-that-bar (lookahead removed).
+
+Statistics debt closed: the imbalance backtest now reports Newey-West/HAC
+z alongside the naive one, with n_eff = n/(L+1) held against the min-n bar;
+the Kelly report haircuts BOTH inputs (Wilson-bounded p AND a 90% lower
+bound on payoff b; $0 scratches no longer count as losses).
+
+Shipped bundle: deploy/ (hardened systemd units, mandatory pre-market
+restart timer with ET-aware OnCalendar, logrotate, runbook) and seven new
+test files (governor check order, exit priority matrix, boot adoption,
+breaker state edges, OR gap days, resample anchoring, risk property tests).

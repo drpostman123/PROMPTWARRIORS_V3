@@ -81,6 +81,12 @@ execution:
   entry_abandon_sec: 30
 
 exits:                       # arbitrated priority table (spec §7)
+  # NYSE 13:00 ET early closes — VERIFY against the exchange calendar each
+  # January; on these dates force_flat shifts to 12:30 automatically.
+  early_close_dates:
+    - 2026-11-27             # day after Thanksgiving
+    - 2026-12-24             # Christmas Eve
+    - 2027-11-26             # day after Thanksgiving
   profit_target_mult: 1.65   # P4a: 1.65 x debit ...
   profit_target_width_frac: 0.80   # ... capped at 0.80 x width
   hard_stop_pct: 50          # P3, on 2 consecutive spread marks

@@ -49,12 +49,22 @@ class GodModeApp:
         self.cfg = cfg
         self.tz = ZoneInfo(cfg.timezone)
         today = datetime.now(self.tz).date()
+        # Half-day sessions (audit R3 #5): shift every clock trigger before the
+        # 13:00 ET close. Single source of truth — everything reads cfg.
+        self.early_close = today in cfg.exits.early_close_dates
+        if self.early_close:
+            cfg.exits.force_flat = time(12, 30)
+            cfg.exits.stale_flush = time(11, 50)
+            cfg.signal.entry_window_end = min(cfg.signal.entry_window_end, time(11, 30))
         self.breaker = CircuitBreaker(cfg.risk, today)
         self.governor = RiskGovernor(cfg, self.breaker)
         self.machine = StateMachine()
         self.store = StateStore(cfg.data)
         self.calendar = EventCalendar(cfg.events, cfg.timezone)
-        self.regime: RegimeModel = RuleBasedRegime(cfg.signal.adx_floor)
+        # Spec §4.2 defaults (0.30/0.25/-0.25). Round-3 critical catch: passing
+        # adx_floor (20.0) here made f_ema > 20 the TREND condition — impossible,
+        # so regime scored 0 and the system could never reach 93.
+        self.regime: RegimeModel = RuleBasedRegime()
         self.scorer = ScoreEngine(cfg.signal)
         self.rel_volume = RelativeVolume(tz=cfg.timezone)
         self.underlying = "SPY" if cfg.execution.underlying in ("SPY", "AUTO") else "SPX"
@@ -111,7 +121,11 @@ class GodModeApp:
             ))
         except BaseException:
             if self.governor.open_positions:
-                self.breaker.trip("fatal runtime crash with open positions")
+                try:
+                    self.breaker.trip("fatal runtime crash with open positions")
+                except Exception as e:              # noqa: BLE001 — audit R3 #6b:
+                    # a lockout-persist failure must not skip the flatten loop.
+                    log.error("crash_trip_failed", error=str(e))
                 for p in self.governor.open_positions:
                     try:
                         await self._exit(p.trade_id, "fatal_crash", "urgent", "runtime dying")
@@ -178,6 +192,12 @@ class GodModeApp:
         """
         if self.cfg.paper_mode:
             return
+        # Boot order sweep first (audit R3 #3a): a SIGKILL mid-ladder leaves
+        # working DAY orders that can fill post-boot into untracked positions.
+        sweeper = getattr(self.broker, "cancel_all_orders", None)
+        if sweeper is not None:
+            if await sweeper() == "unknown":
+                self.governor.kill("unresolvable working orders at boot — manual review required")
         raw = await self.broker.positions()
         if not raw:
             return
@@ -185,11 +205,28 @@ class GodModeApp:
         legs = []
         for p in raw:
             occ = getattr(p, "symbol", "")
+            qty = float(getattr(p, "quantity", 0) or 0)
+            qdir = getattr(p, "quantity_direction", "")
+            itype = getattr(p, "instrument_type", "Equity Option")
+            # Audit R3 #3b: only genuine option legs of the traded underlying may
+            # orphan-kill. An equity share, a closed-today (qty 0) row, or another
+            # underlying's option is SKIPPED with a log — one SPY share must not
+            # brick the whole day with a persisted lockout.
+            if qty == 0 or qdir == "Zero":
+                log.info("reconcile_skip_flat_row", symbol=occ)
+                continue
+            if itype not in ("Equity Option", ""):
+                log.info("reconcile_skip_non_option", symbol=occ, instrument_type=itype)
+                continue
             try:
                 strike = float(occ[-8:]) / 1000.0
                 is_call = occ[-9] == "C"
+                root = occ.split()[0]
             except (ValueError, IndexError):
-                legs.append((p, None, None))
+                log.info("reconcile_skip_unparseable", symbol=occ)
+                continue
+            if root not in (self.underlying, self.underlying + "W"):
+                log.info("reconcile_skip_other_underlying", symbol=occ)
                 continue
             legs.append((p, strike, is_call))
         longs = [(p, s, c) for p, s, c in legs if s is not None and getattr(p, "quantity_direction", "") == "Long"]
@@ -268,9 +305,14 @@ class GodModeApp:
 
     def _end_of_day_baseline(self) -> None:
         """Feed today's bars into the rel-volume baseline exactly once —
-        at EVERY terminal transition, so traded/locked days count too (audit U6b)."""
+        at EVERY terminal transition, so traded/locked days count too (audit U6b).
+        Early-close days are excluded: half-day volumes would bias the 20-day
+        per-slot medians low (audit R3 #5)."""
         if not self._eod_done:
             self._eod_done = True
+            if self.early_close:
+                log.info("relvol_baseline_skipped_early_close")
+                return
             self.rel_volume.end_of_day_update(self.md.session_bars())
 
     async def _score_and_maybe_trade(self) -> None:
@@ -407,7 +449,10 @@ class GodModeApp:
         try:
             fill = await self.broker.open_position(
                 approved, build.long_quote, build.short_quote,
-                quote_getter=self._leg_quote_getter(approved.vertical))
+                quote_getter=self._leg_quote_getter(approved.vertical),
+                # Mid-ladder abort (audit R3 #4): a -6% trip or kill switch
+                # cancels a working entry instead of chasing the ask through it.
+                abort=lambda: not self.breaker.allows_entries or self.governor.killed)
         except Exception as e:                      # noqa: BLE001 — audit B4: never wedge ENTERING
             log.error("entry_error", trade_id=approved.trade_id, error=str(e))
             self.store.log_decision({"kind": "entry_error", "trade_id": approved.trade_id,
@@ -521,7 +566,9 @@ class GodModeApp:
             log.error("exit_no_quotes", trade_id=trade_id)
             return
         heat_before = round(self.governor.heat_pct, 2)
-        fill = await self.broker.close_position(trade_id, pos.vertical, lq, sq, urgency)
+        fill = await self.broker.close_position(
+            trade_id, pos.vertical, lq, sq, urgency,
+            quote_getter=self._leg_quote_getter(pos.vertical))
         if fill is None:
             log.error("exit_unfilled_retrying", trade_id=trade_id, reason=reason)
             return

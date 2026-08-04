@@ -57,6 +57,28 @@ def wilson_lower_bound(p_hat: float, n: int, z: float = 1.645) -> float:
     return max(0.0, (center - margin) / denom)
 
 
+def payoff_lower_bound(wins: list[float], losses: list[float], z: float = 1.645) -> float:
+    """One-sided 90% lower bound on the payoff ratio b = avg_win / avg_loss.
+
+    Kelly's f* = p - (1-p)/b is monotone INCREASING in b, so pairing a
+    worst-case p (Wilson) with a point-estimate b understates risk — the
+    exact error this report exists to prevent. Haircut both: lower-bound
+    the mean win, upper-bound the mean loss (normal-approx one-sided 90%
+    on each). The joint (p_lb, b_lb) is conservative beyond a joint 90%
+    region — acceptable; the sign of the error is the point. With fewer
+    than 2 wins or 2 losses no spread is estimable: return 0 (unproven).
+    """
+    if len(wins) < 2 or len(losses) < 2:
+        return 0.0
+    import statistics
+    mean_w, mean_l = statistics.fmean(wins), statistics.fmean(losses)
+    w_lb = mean_w - z * statistics.stdev(wins) / len(wins) ** 0.5
+    l_ub = mean_l + z * statistics.stdev(losses) / len(losses) ** 0.5
+    if w_lb <= 0 or l_ub <= 0:
+        return 0.0
+    return w_lb / l_ub
+
+
 def load_exits(path: Path) -> list[dict]:
     if not path.exists():
         raise SystemExit(f"no trade log at {path} — the system writes it as it trades")
@@ -80,7 +102,10 @@ def main() -> None:
     pnl = [float(r.get("pnl_net", r.get("pnl", 0.0))) for r in exits]
     fees = [float(r.get("fees", 0.0)) for r in exits]
     wins = [x for x in pnl if x > 0]
-    losses = [-x for x in pnl if x <= 0]
+    # Strict inequality: a $0 scratch is NOT a loss — counting scratches as
+    # $0 losses drags avg_loss down and mechanically inflates b. Scratches
+    # still count against p (they are non-wins) — conservative both ways.
+    losses = [-x for x in pnl if x < 0]
 
     # --- cost drag (always meaningful, even at n=1) ---
     gross = sum(float(r.get("pnl", 0.0)) for r in exits)
@@ -119,13 +144,15 @@ def main() -> None:
     # IS your estimation risk; all sizing verdicts below use the conservative
     # number — "full Kelly is for God, who knows the true probabilities."
     p_lb = wilson_lower_bound(p, n)
-    f_cons = kelly_fraction(p_lb, b)
+    b_lb = payoff_lower_bound(wins, losses)
+    f_cons = kelly_fraction(p_lb, b_lb)
     half = f_cons / 2.0
     print("— Kelly discipline (Kelly 1956 / Thorp) —")
     print(f"hit rate p={p:.3f}   avg win ${avg_win:,.0f}   avg loss ${avg_loss:,.0f}   payoff b={b:.2f}")
-    print(f"full Kelly at measured p     = {f_star:+.3%}")
+    print(f"full Kelly at measured p,b   = {f_star:+.3%}")
     print(f"Wilson 90% lower bound of p  = {p_lb:.3f}  (n={n})")
-    print(f"conservative Kelly (at p_lb) = {f_cons:+.3%}   half of that = {half:+.3%}")
+    print(f"90% lower bound of payoff b  = {b_lb:.2f}  (haircut wins down, losses up)")
+    print(f"conservative Kelly (p_lb, b_lb) = {f_cons:+.3%}   half of that = {half:+.3%}")
     print(f"Kelly gap (estimation risk)  = {f_star - f_cons:.3%}")
     ladder_pct = None
     try:

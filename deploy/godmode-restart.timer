@@ -1,0 +1,33 @@
+# MANDATORY pre-market restart of godmode.service — the system's daily
+# rollover is restart-based BY DESIGN (DESIGN_SPEC deferred items):
+#   - CircuitBreaker takes session_date once in __init__; a stale process keeps
+#     yesterday's date, so lockout/baseline day-matching and the -6% anchor
+#     misbehave across a date boundary.
+#   - The 0DTE option chain is fetched once at boot (_load_chain); without a
+#     restart the runtime has no expiration for the new day.
+#
+# TIMEZONE / UTC HANDLING:
+# OnCalendar below carries an explicit "America/New_York" suffix, so systemd
+# (v235+, i.e. Ubuntu 18.04 and later) evaluates it in ET and DST is handled
+# automatically — 08:30 ET is 12:30 UTC in summer (EDT) and 13:30 UTC in
+# winter (EST); do NOT hardcode a UTC hour or the restart drifts by an hour
+# twice a year. Verify what systemd computed with:
+#   systemd-analyze calendar 'Mon..Fri 08:30 America/New_York'
+# The host itself can stay on UTC (recommended).
+#
+# Persistent=false ON PURPOSE: with Persistent=true, a host that was down at
+# 08:30 would fire the "missed" restart the moment it boots — i.e. bounce the
+# runtime mid-session right after it just started fresh (a fresh boot already
+# IS the rollover). If the host was up but the timer missed, restart manually.
+
+[Unit]
+Description=Daily pre-market restart of GodMode0DTE (restart-based rollover)
+
+[Timer]
+OnCalendar=Mon..Fri 08:30 America/New_York
+Persistent=false
+AccuracySec=30
+Unit=godmode-restart.service
+
+[Install]
+WantedBy=timers.target

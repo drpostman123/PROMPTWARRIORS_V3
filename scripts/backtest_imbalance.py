@@ -97,10 +97,33 @@ def thinning_table(rows: list[tuple[float, float, bool]]) -> str:
     return "\n".join(lines)
 
 
-def logistic_slope(rows: list[tuple[float, float, bool]]) -> tuple[float, float]:
-    """Fit P(fwd>0) = sigmoid(a + b*I) by Newton's method; return (b, z)."""
+def logistic_slope(rows: list[tuple[float, float, bool]],
+                   horizon_min: int = 5,
+                   bar_spacing_min: float = 1.0) -> tuple[float, float, float, int]:
+    """Fit P(fwd>0) = sigmoid(a + b*I); return (b, z_naive, z_hac, n_eff).
+
+    STATISTICS FIX (audit round 3): the rows are per-1-min bars but each
+    carries a `horizon_min`-minute FORWARD return, so consecutive rows share
+    up to L = horizon/spacing - 1 minutes of the same future path. The
+    observations are serially correlated up to lag L, and the naive
+    inverse-Hessian SE (which assumes independence) is too small by roughly
+    sqrt(L+1) — z was inflated by ~sqrt(overlap).
+
+    Remedy: Newey-West/HAC sandwich covariance on the per-observation score
+    vectors g_t = x_t * (y_t - p_t) with Bartlett weights out to lag L:
+
+        Cov(beta) = H^{-1} S H^{-1},
+        S = sum_t g_t g_t' + sum_{l=1..L} w_l * sum_t (g_t g_{t-l}' + g_{t-l} g_t'),
+        w_l = 1 - l/(L+1).
+
+    Rows must be in time order (forward_join sorts). Day boundaries make the
+    true correlation shorter than L at the seams, which only makes the HAC SE
+    mildly conservative. n_eff = ceil(n / (L+1)) is the honest sample size to
+    hold against the spec's min-n bar.
+    """
     X = np.array([[1.0, i] for i, _, _ in rows])
     y = np.array([1.0 if f > 0 else 0.0 for _, f, _ in rows])
+    n = len(y)
     beta = np.zeros(2)
     for _ in range(50):
         p = 1.0 / (1.0 + np.exp(-X @ beta))
@@ -112,9 +135,25 @@ def logistic_slope(rows: list[tuple[float, float, bool]]) -> tuple[float, float]
             break
     p = 1.0 / (1.0 + np.exp(-X @ beta))
     W = p * (1 - p)
-    cov = np.linalg.inv(X.T @ (X * W[:, None]) + 1e-9 * np.eye(2))
-    se_b = math.sqrt(cov[1, 1])
-    return float(beta[1]), float(beta[1] / se_b) if se_b > 0 else 0.0
+    H = X.T @ (X * W[:, None]) + 1e-9 * np.eye(2)
+    Hinv = np.linalg.inv(H)
+    se_naive = math.sqrt(Hinv[1, 1])
+
+    g = X * (y - p)[:, None]                      # (n, 2) score contributions
+    L = max(0, int(math.ceil(horizon_min / bar_spacing_min)) - 1)
+    S = g.T @ g
+    for lag in range(1, min(L, n - 1) + 1):
+        w_l = 1.0 - lag / (L + 1)                 # Bartlett kernel
+        Gl = g[lag:].T @ g[:-lag]
+        S += w_l * (Gl + Gl.T)
+    cov_hac = Hinv @ S @ Hinv
+    se_hac = math.sqrt(max(float(cov_hac[1, 1]), 0.0))
+
+    b = float(beta[1])
+    z_naive = b / se_naive if se_naive > 0 else 0.0
+    z_hac = b / se_hac if se_hac > 0 else 0.0
+    n_eff = int(math.ceil(n / (L + 1)))
+    return b, z_naive, z_hac, n_eff
 
 
 def main() -> None:
@@ -135,12 +174,15 @@ def main() -> None:
     print("— Liquidity thinning (predicts volatility, not direction) —")
     print(thinning_table(rows), "\n")
 
-    b, z = logistic_slope(rows)
+    b, z_naive, z, n_eff = logistic_slope(rows, horizon_min=args.horizon)
     p_two = 2.0 * (1.0 - 0.5 * (1.0 + math.erf(abs(z) / math.sqrt(2))))
     print(f"— Earn-your-weight test: P(up) = sigmoid(a + b*I) —")
-    print(f"slope b = {b:+.4f}, z = {z:+.2f}, p = {p_two:.4f}, n = {len(rows)}")
-    if len(rows) < args.min_n:
-        print(f"VERDICT: INSUFFICIENT DATA (n < {args.min_n}) — imbalance stays a gate, zero weight.")
+    print(f"slope b = {b:+.4f}, z_naive = {z_naive:+.2f} (overlap-inflated, shown for honesty)")
+    print(f"HAC z = {z:+.2f} (Newey-West, L={args.horizon - 1}), p = {p_two:.4f}, "
+          f"n = {len(rows)}, n_eff ~ {n_eff}")
+    if n_eff < args.min_n:
+        print(f"VERDICT: INSUFFICIENT DATA (n_eff {n_eff} < {args.min_n}) — "
+              "imbalance stays a gate, zero weight.")
     elif b > 0 and p_two < 0.05:
         print("VERDICT: PASS — eligible for score weight per DESIGN_SPEC §2.4 "
               "(assign a small weight, rebalance to 100, and keep monitoring).")

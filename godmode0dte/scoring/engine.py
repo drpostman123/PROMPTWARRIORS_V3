@@ -170,23 +170,33 @@ class ScoreEngine:
         pts += 5 * scale if slope_ok else 0
         notes.append(f"vwap_slope:{'Y' if slope_ok else 'N'}")
 
-        # vwap_pullback (4): a recent touch near VWAP that HELD.
+        # vwap_pullback (4): a recent touch near VWAP that HELD. Each bar is
+        # compared to the VWAP AS OF that bar, not today's final value
+        # (audit R3 #6h — comparing history to v[-1] is lookahead).
         pull_ok = False
         if atr5 > 0:
-            for b in inp.bars_1m[-12:]:
+            for idx in range(max(0, len(v) - 12), len(v)):
+                b = inp.bars_1m[idx]
                 near = (b.low if sign > 0 else b.high)
-                if abs(near - v[-1]) <= 0.25 * atr5 and sign * (b.close - v[-1]) > 0:
+                if abs(near - v[idx]) <= 0.25 * atr5 and sign * (b.close - v[idx]) > 0:
                     pull_ok = True
                     break
         pts += 4 * scale if pull_ok else 0
         notes.append(f"vwap_pullback:{'Y' if pull_ok else 'N'}")
 
         # mtf_15m (4): close > EMA9 > EMA21 on closed 15m bars (mirrored short).
+        # >= 5 closed bars with SMA seeding (audit R3 #6g): two bars of EMA21
+        # is a coin flip wearing an indicator's name.
         m15_ok = False
         bars15 = resample(inp.bars_1m, 15, drop_partial=True)
-        if len(bars15) >= 2:
+        if len(bars15) >= 5:
             c15 = np.array([b.close for b in bars15])
-            e9, e21 = ema(c15, self._cfg.ema_fast)[-1], ema(c15, self._cfg.ema_slow)[-1]
+            # SMA-seed only once the series covers the period — seeding a
+            # shorter series makes BOTH EMAs the same running mean (equal
+            # forever, sub-part unawardable); plain recursion still
+            # differentiates via the alphas, and the 5-bar floor holds.
+            e9 = ema(c15, self._cfg.ema_fast, sma_seed=len(c15) >= self._cfg.ema_fast)[-1]
+            e21 = ema(c15, self._cfg.ema_slow, sma_seed=len(c15) >= self._cfg.ema_slow)[-1]
             m15_ok = (c15[-1] > e9 > e21) if sign > 0 else (c15[-1] < e9 < e21)
         pts += 4 * scale if m15_ok else 0
         notes.append(f"ema_15m:{'Y' if m15_ok else 'N'}")

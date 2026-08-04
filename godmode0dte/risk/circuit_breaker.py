@@ -114,13 +114,18 @@ class CircuitBreaker:
     # -- persistence ---------------------------------------------------
 
     def _persist_lockout(self, reason: str) -> None:
-        self._lockout_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "date": self._session_date.isoformat(),
             "reason": reason,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
-        self._lockout_path.write_text(json.dumps(payload, indent=2))
+        try:
+            self._lockout_path.parent.mkdir(parents=True, exist_ok=True)
+            self._lockout_path.write_text(json.dumps(payload, indent=2))
+        except OSError as e:
+            # In-memory TRIPPED stays authoritative for this process; only the
+            # cross-restart persistence is lost (audit R3 #6b).
+            log.error("lockout_persist_failed", error=str(e))
 
     def _restore_lockout(self) -> None:
         if not self._lockout_path.exists():

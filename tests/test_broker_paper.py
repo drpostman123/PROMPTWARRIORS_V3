@@ -25,14 +25,17 @@ async def test_paper_round_trip_updates_equity(cfg, governor: RiskGovernor):
     entry_window_now(cfg)
     broker = PaperBroker(ExecutionConfig(), starting_equity=100_000)
 
-    approved = governor.evaluate(make_intent(score=99.0, debit=1.0, contracts=10))
-    fill = await broker.open_position(approved, q(2.0), q(1.0))
+    # Debit 0.80 on a 2-wide = 40% of width — inside the 0.30-0.42 acceptance
+    # band; a 50%-of-width debit is one the system itself would refuse, and
+    # paper now enforces the same governor cap_price as live.
+    approved = governor.evaluate(make_intent(score=99.0, debit=0.80, contracts=10))
+    fill = await broker.open_position(approved, q(1.8), q(1.0))
     assert fill is not None
-    assert fill.price <= approved.vertical.debit * 1.10
+    assert fill.price <= approved.cap_price
 
     # Exit at a higher value -> equity increases by the P&L.
     exit_fill = await broker.close_position(approved.trade_id, approved.vertical,
-                                            q(2.8), q(1.2), urgency="normal")
+                                            q(2.4), q(1.2), urgency="normal")
     assert exit_fill is not None
     pnl = (exit_fill.price - fill.price) * approved.vertical.contracts * 100
     fees = ExecutionConfig().friction_per_contract * approved.vertical.contracts

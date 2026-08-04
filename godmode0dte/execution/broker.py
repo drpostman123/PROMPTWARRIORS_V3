@@ -54,14 +54,15 @@ class Broker(ABC):
     @abstractmethod
     async def open_position(self, approved: ApprovedTrade,
                             long_q: Quote, short_q: Quote,
-                            quote_getter=None) -> Optional[Fill]:
+                            quote_getter=None, abort=None) -> Optional[Fill]:
         """Enter the vertical with a laddered limit order. None = unfilled/abandoned.
-        `quote_getter()` -> (long_q, short_q) re-fetches fresh leg quotes between rungs."""
+        `quote_getter()` -> (long_q, short_q) re-fetches fresh leg quotes between rungs.
+        `abort()` -> True cancels the ladder mid-flight (breaker trip, kill switch)."""
 
     @abstractmethod
     async def close_position(self, trade_id: str, vertical: VerticalSpec,
                              long_q: Quote, short_q: Quote,
-                             urgency: str = "normal") -> Optional[Fill]:
+                             urgency: str = "normal", quote_getter=None) -> Optional[Fill]:
         """Exit the vertical. 'urgent' ladders faster and further."""
 
 
@@ -82,14 +83,24 @@ class PaperBroker(Broker):
 
     async def open_position(self, approved: ApprovedTrade,
                             long_q: Quote, short_q: Quote,
-                            quote_getter=None) -> Optional[Fill]:
+                            quote_getter=None, abort=None) -> Optional[Fill]:
+        if abort is not None and abort():
+            log.warning("paper_entry_aborted", trade_id=approved.trade_id)
+            return None
         natural_mid = long_q.mid - short_q.mid
         natural_ask = long_q.ask - short_q.bid
         # Paper assumption: fill one ladder step above mid (realistic-ish slippage).
-        price = round(natural_mid + (natural_ask - natural_mid) * self._cfg.ladder_step_frac, 2)
-        if price > approved.vertical.debit * 1.10:
-            log.warning("paper_entry_abandoned", trade_id=approved.trade_id, price=price)
+        # Same cap discipline as live (audit R3 #6e): governor cap_price, tick
+        # snap, and the money-invariant assert.
+        v = approved.vertical
+        price_cap = approved.cap_price or v.debit * 1.10
+        price = natural_mid + (natural_ask - natural_mid) * self._cfg.ladder_step_frac
+        if price > price_cap:
+            log.warning("paper_entry_abandoned", trade_id=approved.trade_id, price=round(price, 2))
             return None
+        price = snap_tick(price, v.underlying, round_up=False)
+        assert v.contracts * price * 100 <= approved.risk_dollars + 1e-6, \
+            "paper entry price would exceed governor-approved risk"
         await asyncio.sleep(self._cfg.ladder_step_wait_sec / 10)   # token latency
         self._open[approved.trade_id] = approved
         self._entry_fills[approved.trade_id] = price
@@ -99,7 +110,11 @@ class PaperBroker(Broker):
 
     async def close_position(self, trade_id: str, vertical: VerticalSpec,
                              long_q: Quote, short_q: Quote,
-                             urgency: str = "normal") -> Optional[Fill]:
+                             urgency: str = "normal", quote_getter=None) -> Optional[Fill]:
+        if quote_getter is not None:
+            fresh = quote_getter()
+            if fresh is not None:
+                long_q, short_q = fresh
         natural_mid = long_q.mid - short_q.mid
         natural_bid = long_q.bid - short_q.ask
         haircut = self._cfg.ladder_step_frac * (2 if urgency == "urgent" else 1)
@@ -134,7 +149,9 @@ class TastytradeBroker(Broker):
         self._session = session
         self._account = account
         self._cfg = cfg
-        self._live_orders: dict[str, object] = {}
+        # trade_id -> (order_id, limit px) for any order whose status was not
+        # confirmed terminal; consulted before ANY new placement for that trade.
+        self._live_orders: dict[str, tuple[object, float]] = {}
 
     async def equity(self) -> float:
         balances = await self._account.a_get_balances(self._session)
@@ -143,78 +160,161 @@ class TastytradeBroker(Broker):
     async def positions(self) -> list:
         return await self._account.a_get_positions(self._session)
 
+    # ---- order-lifecycle doctrine (audit R3 #2): never two live orders for
+    # one trade, never a blind rung over an unresolved order, never a
+    # presence-only "was it filled" answer.
+
+    async def _leg_qty(self, symbol: str) -> Optional[float]:
+        try:
+            positions = await self._account.a_get_positions(self._session)
+        except Exception as e:                       # noqa: BLE001
+            log.error("leg_qty_fetch_failed", symbol=symbol, error=str(e))
+            return None
+        for p in positions:
+            if getattr(p, "symbol", None) == symbol:
+                return abs(float(getattr(p, "quantity", 0) or 0))
+        return 0.0
+
+    async def _check_remembered(self, trade_id: str) -> tuple[str, float]:
+        """Resolve any remembered working order for this trade.
+        Returns ('clear'|'filled'|'blocked', px)."""
+        remembered = self._live_orders.get(trade_id)
+        if remembered is None:
+            return "clear", 0.0
+        order_id, px = remembered
+        outcome = await self._resolve_terminal(order_id, 10.0)
+        if outcome == "filled":
+            del self._live_orders[trade_id]
+            return "filled", px
+        if outcome == "gone":
+            del self._live_orders[trade_id]
+            return "clear", px
+        log.error("remembered_order_unresolved", trade_id=trade_id, order_id=order_id)
+        return "blocked", px
+
+    async def cancel_all_orders(self) -> str:
+        """Boot sweep (audit R3 #3a): cancel every working order; a SIGKILL
+        mid-ladder leaves DAY orders that can fill post-boot into untracked
+        positions. Returns 'clean' or 'unknown' (something unresolvable)."""
+        try:
+            orders = await self._account.a_get_live_orders(self._session)
+        except Exception as e:                       # noqa: BLE001
+            log.error("boot_order_sweep_failed", error=str(e))
+            return "unknown"
+        result = "clean"
+        for o in orders:
+            try:
+                await self._account.a_delete_order(self._session, o.id)
+            except Exception:                        # noqa: BLE001
+                if await self._resolve_terminal(o.id, 10.0) == "unknown":
+                    result = "unknown"
+        if orders:
+            log.warning("boot_orders_swept", count=len(orders), result=result)
+        return result
+
     async def open_position(self, approved: ApprovedTrade,
                             long_q: Quote, short_q: Quote,
-                            quote_getter=None) -> Optional[Fill]:
+                            quote_getter=None, abort=None) -> Optional[Fill]:
         from decimal import Decimal
         from tastytrade.instruments import Option
         from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType
 
         v = approved.vertical
+        state, px_rem = await self._check_remembered(approved.trade_id)
+        if state == "filled":
+            return Fill(approved.trade_id, px_rem, datetime.now(timezone.utc))
+        if state == "blocked":
+            return None
+
+        # Quantity snapshot BEFORE any placement: "filled" is only ever declared
+        # by a quantity DELTA — presence alone lies when a same-strike position
+        # already exists (2 concurrent positions are legal).
+        qty_before = await self._leg_qty(v.long_symbol)
+        if qty_before is None:
+            log.error("entry_refused_no_snapshot", trade_id=approved.trade_id)
+            return None
+
         long_opt = await Option.a_get(self._session, v.long_symbol)
         short_opt = await Option.a_get(self._session, v.short_symbol)
-
-        # Worst-fill cap comes from the governor (sizing was done AT this price —
-        # audit U1); assert the money invariant before every submit.
         price_cap = approved.cap_price or min(v.debit * 1.10,
                                               self._cfg.ladder_cap_pct_of_width * v.width)
         last_px = 0.0
-        for step in range(self._cfg.ladder_max_steps + 1):
-            # Intent age wall (spec §6.4): a 90s-old signal is a different market.
-            age = (datetime.now(timezone.utc) - approved.approved_ts).total_seconds()
-            if age > self._cfg.intent_max_age_sec:
-                log.warning("entry_abandoned_age", trade_id=approved.trade_id, age=age)
-                break
-            # Re-quote between rungs; refuse stale legs (audit U5c).
-            if quote_getter is not None:
-                fresh = quote_getter()
-                if fresh is None:
-                    log.warning("entry_abandoned_quotes", trade_id=approved.trade_id)
-                    break
-                long_q, short_q = fresh
-            q_age = (datetime.now(timezone.utc) - min(long_q.ts, short_q.ts)).total_seconds()
-            if q_age > self._cfg.quote_staleness_sec + self._cfg.ladder_step_wait_sec:
-                log.warning("entry_abandoned_stale", trade_id=approved.trade_id, q_age=q_age)
-                break
-            natural_mid = long_q.mid - short_q.mid
-            natural_ask = long_q.ask - short_q.bid
-            px = natural_mid + (natural_ask - natural_mid) * min(1.0, step * self._cfg.ladder_step_frac)
-            px = snap_tick(min(px, price_cap), v.underlying, round_up=False)
-            last_px = px
-            assert v.contracts * px * 100 <= approved.risk_dollars + 1e-6, \
-                "entry ladder price would exceed governor-approved risk"
-            order = NewOrder(
-                time_in_force=OrderTimeInForce.DAY,
-                order_type=OrderType.LIMIT,
-                legs=[
-                    long_opt.build_leg(Decimal(v.contracts), OrderAction.BUY_TO_OPEN),
-                    short_opt.build_leg(Decimal(v.contracts), OrderAction.SELL_TO_OPEN),
-                ],
-                price=Decimal(str(-px)),          # debit orders use negative price
-            )
-            resp = await self._account.a_place_order(self._session, order, dry_run=False)
-            placed = resp.order
-            if await self._await_fill(placed, self._cfg.ladder_step_wait_sec):
-                log.info("entry_filled", trade_id=approved.trade_id, price=px, step=step)
-                return Fill(approved.trade_id, px, datetime.now(timezone.utc))
-            # Cancel-vs-fill race (audit B3): the cancel can lose to a fill.
-            try:
-                await self._account.a_delete_order(self._session, placed.id)
-            except Exception as e:                  # noqa: BLE001 — may already be filled
-                log.warning("entry_cancel_failed", trade_id=approved.trade_id, error=str(e))
-                outcome = await self._resolve_terminal(placed.id, 10.0)
-                if outcome == "filled":
-                    return Fill(approved.trade_id, px, datetime.now(timezone.utc))
-                if outcome == "unknown":
-                    break                            # reconcile below; never re-ladder blind
-        # Before declaring the entry dead, ask the broker: did a fill land anyway?
         try:
-            positions = await self._account.a_get_positions(self._session)
-            if any(getattr(p, "symbol", None) == v.long_symbol for p in positions):
-                log.warning("entry_reconciled_filled", trade_id=approved.trade_id)
-                return Fill(approved.trade_id, last_px or price_cap, datetime.now(timezone.utc))
-        except Exception as e:                      # noqa: BLE001
-            log.error("entry_reconcile_failed", trade_id=approved.trade_id, error=str(e))
+            for step in range(self._cfg.ladder_max_steps + 1):
+                # Mid-ladder abort: breaker trip / kill switch (audit R3 #4).
+                if abort is not None and abort():
+                    log.warning("entry_aborted", trade_id=approved.trade_id, step=step)
+                    break
+                # Intent age wall (spec §6.4): a 90s-old signal is a different market.
+                age = (datetime.now(timezone.utc) - approved.approved_ts).total_seconds()
+                if age > self._cfg.intent_max_age_sec:
+                    log.warning("entry_abandoned_age", trade_id=approved.trade_id, age=age)
+                    break
+                # Re-quote between rungs; refuse stale legs (audit U5c).
+                if quote_getter is not None:
+                    fresh = quote_getter()
+                    if fresh is None:
+                        log.warning("entry_abandoned_quotes", trade_id=approved.trade_id)
+                        break
+                    long_q, short_q = fresh
+                q_age = (datetime.now(timezone.utc) - min(long_q.ts, short_q.ts)).total_seconds()
+                if q_age > self._cfg.quote_staleness_sec + self._cfg.ladder_step_wait_sec:
+                    log.warning("entry_abandoned_stale", trade_id=approved.trade_id, q_age=q_age)
+                    break
+                natural_mid = long_q.mid - short_q.mid
+                natural_ask = long_q.ask - short_q.bid
+                px = natural_mid + (natural_ask - natural_mid) * min(1.0, step * self._cfg.ladder_step_frac)
+                px = snap_tick(min(px, price_cap), v.underlying, round_up=False)
+                last_px = px
+                assert v.contracts * px * 100 <= approved.risk_dollars + 1e-6, \
+                    "entry ladder price would exceed governor-approved risk"
+                order = NewOrder(
+                    time_in_force=OrderTimeInForce.DAY,
+                    order_type=OrderType.LIMIT,
+                    legs=[
+                        long_opt.build_leg(Decimal(v.contracts), OrderAction.BUY_TO_OPEN),
+                        short_opt.build_leg(Decimal(v.contracts), OrderAction.SELL_TO_OPEN),
+                    ],
+                    price=Decimal(str(-px)),          # debit orders use negative price
+                )
+                resp = await self._account.a_place_order(self._session, order, dry_run=False)
+                placed = resp.order
+                self._live_orders[approved.trade_id] = (placed.id, px)
+                if await self._await_fill(placed, self._cfg.ladder_step_wait_sec):
+                    del self._live_orders[approved.trade_id]
+                    log.info("entry_filled", trade_id=approved.trade_id, price=px, step=step)
+                    return Fill(approved.trade_id, px, datetime.now(timezone.utc))
+                # Cancel-vs-fill race (audit B3): the cancel can lose to a fill.
+                try:
+                    await self._account.a_delete_order(self._session, placed.id)
+                    del self._live_orders[approved.trade_id]
+                except Exception as e:              # noqa: BLE001 — may already be filled
+                    log.warning("entry_cancel_failed", trade_id=approved.trade_id, error=str(e))
+                    outcome = await self._resolve_terminal(placed.id, 10.0)
+                    if outcome == "filled":
+                        del self._live_orders[approved.trade_id]
+                        return Fill(approved.trade_id, px, datetime.now(timezone.utc))
+                    if outcome == "gone":
+                        del self._live_orders[approved.trade_id]
+                    # gone AND unknown both stop the ladder — reconcile decides
+                    # (audit R3 #2a: "gone" can be a same-day filled-and-dropped).
+                    break
+        except Exception as e:                       # noqa: BLE001 — audit R3 #2c
+            # A poll/placement exception must not strand a working DAY order.
+            log.error("entry_ladder_error", trade_id=approved.trade_id, error=str(e))
+            remembered = self._live_orders.get(approved.trade_id)
+            if remembered is not None:
+                try:
+                    await self._account.a_delete_order(self._session, remembered[0])
+                    del self._live_orders[approved.trade_id]
+                except Exception:                    # noqa: BLE001
+                    pass                             # stays remembered: next call resolves it
+        # Reconcile by quantity delta before declaring the entry dead.
+        qty_after = await self._leg_qty(v.long_symbol)
+        if qty_after is not None and qty_after >= qty_before + v.contracts:
+            self._live_orders.pop(approved.trade_id, None)
+            log.warning("entry_reconciled_filled", trade_id=approved.trade_id)
+            return Fill(approved.trade_id, last_px or price_cap, datetime.now(timezone.utc))
         log.warning("entry_abandoned", trade_id=approved.trade_id)
         return None
 
@@ -240,58 +340,104 @@ class TastytradeBroker(Broker):
 
     async def close_position(self, trade_id: str, vertical: VerticalSpec,
                              long_q: Quote, short_q: Quote,
-                             urgency: str = "normal") -> Optional[Fill]:
+                             urgency: str = "normal", quote_getter=None) -> Optional[Fill]:
         """Close the vertical for a credit: SELL_TO_CLOSE long, BUY_TO_CLOSE short.
 
-        Ladders from the mid credit toward the natural (bid-side) credit.
-        'urgent' doubles the step size, halves the wait, and adds one final
-        step a tick through the natural so breaker/force-flat exits always
-        clear. Returns None if still unfilled — the risk task retries.
+        Ladders from the mid credit toward the natural (bid-side) credit,
+        RE-QUOTING both legs before every rung (audit R3 #4 — during a DXLink
+        reconnect the captured book is frozen and every rung prices a ghost).
+        'urgent' doubles the step size, halves the wait; its final rung — and
+        any urgent rung priced off stale quotes — is a floor-credit limit
+        (max(0.05, natural - 0.05)): defined-risk and guaranteed marketable.
+        Returns None if still unfilled — the risk task retries; a remembered
+        unresolved order blocks the next attempt until its status is terminal.
         """
         from decimal import Decimal
         from tastytrade.instruments import Option
         from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType
 
+        state, px_rem = await self._check_remembered(trade_id)
+        if state == "filled":
+            return Fill(trade_id, px_rem, datetime.now(timezone.utc))
+        if state == "blocked":
+            return None
+
         long_opt = await Option.a_get(self._session, vertical.long_symbol)
         short_opt = await Option.a_get(self._session, vertical.short_symbol)
-        mid_credit = long_q.mid - short_q.mid
-        natural_credit = long_q.bid - short_q.ask
         step_frac = self._cfg.ladder_step_frac * (2 if urgency == "urgent" else 1)
         wait = self._cfg.ladder_step_wait_sec / (2 if urgency == "urgent" else 1)
         steps = list(range(self._cfg.ladder_max_steps + 1))
 
-        for step in steps:
-            px = mid_credit - (mid_credit - natural_credit) * min(1.0, step * step_frac)
-            if urgency == "urgent" and step == steps[-1]:
-                px = natural_credit - 0.05          # through the market: get out, now
-            px = snap_tick(max(px, 0.0), vertical.underlying, round_up=True)
-            order = NewOrder(
-                time_in_force=OrderTimeInForce.DAY,
-                order_type=OrderType.LIMIT,
-                legs=[
-                    long_opt.build_leg(Decimal(vertical.contracts), OrderAction.SELL_TO_CLOSE),
-                    short_opt.build_leg(Decimal(vertical.contracts), OrderAction.BUY_TO_CLOSE),
-                ],
-                price=Decimal(str(px)),             # credit orders use positive price
-            )
-            resp = await self._account.a_place_order(self._session, order, dry_run=False)
-            placed = resp.order
-            if await self._await_fill(placed, wait):
-                log.info("exit_filled", trade_id=trade_id, price=px, step=step, urgency=urgency)
-                return Fill(trade_id, px, datetime.now(timezone.utc))
-            # Spec §7: an unconfirmed cancel gets NO replacement until its status
-            # resolves — two live closers can both fill and manufacture a fresh
-            # short vertical (audit B9).
-            try:
-                await self._account.a_delete_order(self._session, placed.id)
-            except Exception as e:                  # noqa: BLE001 — may already be filled
-                log.warning("exit_cancel_failed", trade_id=trade_id, error=str(e))
-                outcome = await self._resolve_terminal(placed.id, 10.0)
-                if outcome == "filled":
+        try:
+            for step in steps:
+                stale = False
+                if quote_getter is not None:
+                    fresh = quote_getter()
+                    if fresh is not None:
+                        long_q, short_q = fresh
+                q_age = (datetime.now(timezone.utc) - min(long_q.ts, short_q.ts)).total_seconds()
+                if q_age > self._cfg.quote_staleness_sec + wait:
+                    stale = True
+                    if urgency != "urgent":
+                        log.warning("exit_deferred_stale", trade_id=trade_id, q_age=q_age)
+                        return None                  # risk task retries with fresh quotes
+                mid_credit = long_q.mid - short_q.mid
+                natural_credit = long_q.bid - short_q.ask
+                px = mid_credit - (mid_credit - natural_credit) * min(1.0, step * step_frac)
+                if urgency == "urgent" and (step == steps[-1] or stale):
+                    # Get out, now — but never a true market order, and never $0.
+                    px = max(0.05, natural_credit - 0.05)
+                    px = snap_tick(px, vertical.underlying, round_up=False)
+                else:
+                    px = snap_tick(max(px, 0.0), vertical.underlying, round_up=True)
+                order = NewOrder(
+                    time_in_force=OrderTimeInForce.DAY,
+                    order_type=OrderType.LIMIT,
+                    legs=[
+                        long_opt.build_leg(Decimal(vertical.contracts), OrderAction.SELL_TO_CLOSE),
+                        short_opt.build_leg(Decimal(vertical.contracts), OrderAction.BUY_TO_CLOSE),
+                    ],
+                    price=Decimal(str(px)),          # credit orders use positive price
+                )
+                resp = await self._account.a_place_order(self._session, order, dry_run=False)
+                placed = resp.order
+                self._live_orders[trade_id] = (placed.id, px)
+                if await self._await_fill(placed, wait):
+                    del self._live_orders[trade_id]
+                    log.info("exit_filled", trade_id=trade_id, price=px, step=step, urgency=urgency)
                     return Fill(trade_id, px, datetime.now(timezone.utc))
-                if outcome == "unknown":
+                # Spec §7: an unconfirmed cancel gets NO replacement until its
+                # status resolves — two live closers can both fill and
+                # manufacture a fresh short vertical (audit B9).
+                try:
+                    await self._account.a_delete_order(self._session, placed.id)
+                    del self._live_orders[trade_id]
+                except Exception as e:              # noqa: BLE001 — may already be filled
+                    log.warning("exit_cancel_failed", trade_id=trade_id, error=str(e))
+                    outcome = await self._resolve_terminal(placed.id, 10.0)
+                    if outcome == "filled":
+                        del self._live_orders[trade_id]
+                        return Fill(trade_id, px, datetime.now(timezone.utc))
+                    if outcome == "gone":
+                        # Cancelled OR same-day filled-and-dropped (audit R3 #2a):
+                        # ask the position, never the next rung.
+                        del self._live_orders[trade_id]
+                        held = await self._leg_qty(vertical.long_symbol)
+                        if held is not None and held < vertical.contracts:
+                            return Fill(trade_id, px, datetime.now(timezone.utc))
+                        return None                  # still held: retry next tick
                     log.error("exit_cancel_unresolved", trade_id=trade_id, order_id=placed.id)
-                    return None                     # risk task retries next tick
+                    return None                      # stays remembered; next call resolves
+        except Exception as e:                       # noqa: BLE001 — audit R3 #2c
+            log.error("exit_ladder_error", trade_id=trade_id, error=str(e))
+            remembered = self._live_orders.get(trade_id)
+            if remembered is not None:
+                try:
+                    await self._account.a_delete_order(self._session, remembered[0])
+                    del self._live_orders[trade_id]
+                except Exception:                    # noqa: BLE001
+                    pass                             # stays remembered: next call resolves it
+            return None
         log.error("exit_ladder_exhausted", trade_id=trade_id, urgency=urgency)
         return None
 
@@ -300,7 +446,12 @@ class TastytradeBroker(Broker):
         deadline = asyncio.get_event_loop().time() + wait_sec
         while asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(1.0)
-            orders = await self._account.a_get_live_orders(self._session)
+            try:
+                orders = await self._account.a_get_live_orders(self._session)
+            except Exception as e:                   # noqa: BLE001 — audit R3 #2c:
+                # a poll hiccup must not escape and strand the working order.
+                log.warning("await_fill_poll_failed", error=str(e))
+                continue
             for o in orders:
                 if o.id == placed_order.id:
                     if o.status == OrderStatus.FILLED:

@@ -1,0 +1,56 @@
+# GodMode0DTE Streamlit dashboard — read-only viewer of state/snapshot.json.
+#
+# NOTES:
+# - Same WorkingDirectory as the runtime is MANDATORY: dashboard/app.py resolves
+#   state/snapshot.json and state/trades.jsonl relative to CWD (with a relative
+#   fallback if config load fails). Wrong CWD => it silently shows an empty
+#   "waiting for runtime" page against a fresh state/ directory.
+# - Binds 127.0.0.1 only. Reach it via SSH tunnel:
+#     ssh -L 8501:127.0.0.1:8501 <host>   then open http://localhost:8501
+#   Do NOT expose it publicly; it has no auth.
+# - The dashboard never writes state and holds no credentials, but it reads the
+#   same EnvironmentFile-free environment; it does not need /etc/godmode/env.
+
+[Unit]
+Description=GodMode0DTE dashboard (Streamlit, localhost only)
+After=network.target
+# Viewer, not a dependency: it must be able to run while godmode.service is
+# down (that is exactly when you want to look at the last snapshot).
+
+[Service]
+Type=simple
+User=godmode
+Group=godmode
+WorkingDirectory=/opt/godmode
+ExecStart=/opt/godmode/venv/bin/streamlit run godmode0dte/dashboard/app.py \
+    --server.address 127.0.0.1 \
+    --server.port 8501 \
+    --server.headless true \
+    --browser.gatherUsageStats false
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Hardening (read-only view of the tree; needs no write access at all, but
+# Streamlit wants a writable HOME for its config — PrivateTmp + a scratch dir).
+Environment=HOME=/opt/godmode/.dashboard-home
+ReadWritePaths=/opt/godmode/.dashboard-home
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

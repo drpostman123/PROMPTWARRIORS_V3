@@ -26,6 +26,7 @@ def open_position(governor, cfg, debit=1.0, contracts=4, mark=None, held_min=5) 
         entry_ts=NOW - timedelta(minutes=held_min),
         score_at_entry=99.0, or_mid=560.0,
         current_value=mark if mark is not None else debit,
+        mark_ts=NOW,     # freshly marked — the never-marked escalation is tested separately
     )
     governor.register_position(pos)
     return pos

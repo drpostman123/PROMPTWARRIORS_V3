@@ -132,17 +132,35 @@ def _trend_bars(n: int, step: float) -> list[Bar]:
     return out
 
 
-def test_regime_unknown_until_four_bars_then_confident():
+def test_regime_unknown_until_atr14_is_real_then_confident():
+    """Audit R3 #6f: 15-bar floor — ATR(3) at 09:50 miscalibrated every
+    ATR-normalized feature, so regime (and entries) arm at ~10:45."""
     model = RuleBasedRegime()
-    assert model.classify(_trend_bars(3, 0.5), vix=17.0).regime is Regime.UNKNOWN
-    state = model.classify(_trend_bars(12, 0.5), vix=17.0)
+    assert model.classify(_trend_bars(4, 0.5), vix=17.0).regime is Regime.UNKNOWN
+    assert model.classify(_trend_bars(14, 0.5), vix=17.0).regime is Regime.UNKNOWN
+    state = model.classify(_trend_bars(15, 0.5), vix=17.0)
     assert state.regime is Regime.TREND_UP
     assert state.confidence == pytest.approx(0.85)
 
 
 def test_regime_range_when_flat():
-    state = RuleBasedRegime().classify(_trend_bars(12, 0.0001), vix=17.0)
+    state = RuleBasedRegime().classify(_trend_bars(20, 0.0001), vix=17.0)
     assert state.regime is Regime.RANGE
+
+
+def test_app_constructs_regime_with_spec_thresholds(cfg, tmp_path):
+    """Round-3 critical: RuleBasedRegime(cfg.signal.adx_floor) passed 20.0 as
+    the EMA-slope floor — TREND unreachable, system could never reach 93.
+    The regression test goes through the APP constructor, not a hand-built
+    classifier, so the wiring itself is what is under test."""
+    from godmode0dte.app import GodModeApp
+    cfg.data.snapshot_path = str(tmp_path / "snap.json")
+    cfg.data.trade_log_path = str(tmp_path / "t.jsonl")
+    cfg.data.decision_log_path = str(tmp_path / "d.jsonl")
+    app = GodModeApp(cfg)
+    state = app.regime.classify(_trend_bars(15, 0.5), vix=17.0)
+    assert state.regime is Regime.TREND_UP
+    assert state.confidence >= 0.85
 
 
 # ---- Kelly math (edge_report) ----------------------------------------------

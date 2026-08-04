@@ -1,0 +1,71 @@
+# GodMode0DTE trading runtime — systemd unit.
+# Install: cp deploy/godmode.service /etc/systemd/system/ && systemctl daemon-reload
+#
+# NOTES (load-bearing, do not "clean up"):
+# - WorkingDirectory is MANDATORY: every safety-state path in the code is
+#   CWD-relative (state/lockout.json, state/baseline.json, logs/, config/).
+#   Running from any other directory silently re-arms a tripped -6% lockout.
+# - KillSignal=SIGINT: __main__.py only handles KeyboardInterrupt; systemd's
+#   default SIGTERM would hard-kill the asyncio loop with no graceful path.
+#   SIGINT raises KeyboardInterrupt -> asyncio.run cancels tasks -> the
+#   BaseException crash-flatten in app.start() runs before exit.
+# - StartLimit*: each start performs a real Tastytrade Session login. A tight
+#   crash loop would hammer the auth endpoint and can get the account
+#   temporarily blocked. 5 attempts / 10 min, then stay down and alert.
+# - Daily rollover is RESTART-BASED by design (CircuitBreaker session_date is
+#   fixed at __init__; the 0DTE chain is fetched once at boot). The paired
+#   godmode-restart.timer is therefore mandatory, not optional.
+
+[Unit]
+Description=GodMode0DTE live 0DTE debit-vertical runtime
+Documentation=file:/opt/godmode/deploy/README.md
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=godmode
+Group=godmode
+WorkingDirectory=/opt/godmode
+EnvironmentFile=/etc/godmode/env
+ExecStart=/opt/godmode/venv/bin/python -m godmode0dte --config /opt/godmode/config/config.yaml
+
+# Graceful shutdown: SIGINT -> KeyboardInterrupt -> cancel -> crash-flatten.
+KillSignal=SIGINT
+TimeoutStopSec=90
+SendSIGKILL=yes
+FinalKillSignal=SIGKILL
+
+# Restart on failure with backoff. Clean exit (operator Ctrl-C / systemctl
+# stop) does NOT restart — that is deliberate.
+Restart=on-failure
+RestartSec=15
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/godmode/state /opt/godmode/logs
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

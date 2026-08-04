@@ -1,0 +1,16 @@
+# Oneshot invoked by godmode-restart.timer. Runs as root (needs systemctl).
+#
+# `restart` (not `try-restart`) on purpose: if the runtime crashed out of its
+# StartLimitBurst overnight, the pre-market restart must bring it BACK UP for
+# the new session, not skip it because it happens to be inactive.
+# At 08:30 ET the book is flat (force-flat was 15:30 the prior day), and even
+# if legs somehow survived, boot adoption (_reconcile) re-adopts them, and a
+# same-day lockout/baseline is restored from state/lockout.json /
+# state/baseline.json — so this restart is safe by construction.
+
+[Unit]
+Description=Pre-market restart of godmode.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart godmode.service

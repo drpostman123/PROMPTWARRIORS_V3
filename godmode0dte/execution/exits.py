@@ -101,6 +101,12 @@ class ExitEngine:
         if p.mark_ts is not None and (now - p.mark_ts).total_seconds() > 10 * self._mark_staleness:
             return ExitDecision(p.trade_id, "stale_mark", "urgent",
                                 f"mark frozen {(now - p.mark_ts).total_seconds():.0f}s")
+        # NEVER-marked hazard (audit R3 #6c): an adopted position whose legs
+        # never produce a mark (symbol not in the chain, feed gap) would be
+        # managed blind until the time stop. Same escalation.
+        if p.mark_ts is None and (now - p.entry_ts).total_seconds() > 10 * self._mark_staleness:
+            return ExitDecision(p.trade_id, "stale_mark", "urgent",
+                                f"never marked in {(now - p.entry_ts).total_seconds():.0f}s")
 
         # P4a — profit target: 1.65 x debit, capped at 0.80 x width.
         target = min(debit * self._cfg.profit_target_mult,

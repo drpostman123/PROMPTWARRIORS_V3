@@ -11,13 +11,22 @@ import numpy as np
 from godmode0dte.models import Bar
 
 
-def ema(values: np.ndarray, period: int) -> np.ndarray:
+def ema(values: np.ndarray, period: int, sma_seed: bool = False) -> np.ndarray:
+    """EMA. ``sma_seed=True`` seeds with the running mean of the available
+    prefix (up to `period` values) instead of the first value — on short
+    series a first-value seed over-weights the opening print (audit R3 #6g)."""
     if len(values) == 0:
         return values
     alpha = 2.0 / (period + 1)
     out = np.empty_like(values, dtype=float)
-    out[0] = values[0]
-    for i in range(1, len(values)):
+    if sma_seed:
+        k = min(period, len(values))
+        out[:k] = np.cumsum(values[:k]) / np.arange(1, k + 1)
+        start = k
+    else:
+        out[0] = values[0]
+        start = 1
+    for i in range(start, len(values)):
         out[i] = alpha * values[i] + (1 - alpha) * out[i - 1]
     return out
 
