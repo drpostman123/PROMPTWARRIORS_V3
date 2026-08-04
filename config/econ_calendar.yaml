@@ -1,0 +1,13 @@
+# Economic calendar — maintained by the operator (or generated from an API).
+# impact: high events create entry blackouts (see events.* config).
+# all_day + bias restricts the whole day to one direction; all_day without
+# bias locks the day entirely. FOMC days lock the session by default.
+events:
+  - name: CPI
+    date: 2026-08-12
+    time: "08:30"
+    impact: high
+  - name: FOMC
+    date: 2026-09-16
+    time: "14:00"
+    impact: high

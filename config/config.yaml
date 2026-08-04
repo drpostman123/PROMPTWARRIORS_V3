@@ -1,0 +1,82 @@
+# GodMode0DTE configuration.
+# Hard risk ceilings are enforced in code (config can tighten, never loosen):
+#   per-trade <= 4% equity, heat <= 7%, <= 2 positions, daily loss <= 6%.
+
+paper_mode: true            # live also requires GODMODE_CONFIRM_LIVE=YES env var
+account_index: 0
+timezone: America/New_York
+
+risk:
+  max_trade_risk_pct: 4.0
+  max_heat_pct: 7.0
+  max_concurrent_positions: 2
+  daily_loss_limit_pct: 6.0
+  min_equity: 2000
+  max_data_staleness_sec: 5
+  min_intent_spacing_sec: 60
+  lockout_file: state/lockout.json
+  sizing_ladder:            # score band lower bound -> fraction of the 4% cap
+    93: 0.50
+    95: 0.75
+    97: 1.00
+
+signal:
+  min_score: 93
+  weights:                  # must sum to 100
+    opening_range: 15
+    breakout_confirmation: 20
+    mtf_alignment: 20
+    regime: 15
+    macro_cluster: 10
+    event_sentiment: 5
+    dow_vix_preference: 5
+    microstructure: 10
+  or_min_width_pct: 0.05
+  or_max_width_pct: 0.35
+  or_max_width_atr_mult: 1.2
+  breakout_buffer_pct: 0.02
+  min_rel_volume: 1.3
+  min_close_location: 0.7
+  entry_window_start: "09:40:00"
+  entry_window_end: "11:30:00"
+  min_regime_confidence: 0.65
+  vix_sweet_low: 13
+  vix_sweet_high: 24
+  vix_hard_max: 32
+  dow_points: {mon: 2, tue: 3, wed: 2, thu: 3, fri: 1}
+
+events:
+  blackout_before_min: 30
+  blackout_after_min: 15
+  fomc_day_lockout: true
+  calendar_file: config/econ_calendar.yaml
+
+execution:
+  underlying: SPY           # SPY | SPX | AUTO
+  long_delta_min: 0.55
+  long_delta_max: 0.70
+  width_strikes_spy: 2
+  width_points_spx: 20
+  min_debit_pct_of_width: 0.30
+  max_debit_pct_of_width: 0.55
+  max_leg_spread_pct_of_mid: 6.0
+  max_leg_spread_abs: 0.10
+  min_open_interest: 250
+  quote_staleness_sec: 3
+  ladder_step_frac: 0.15
+  ladder_step_wait_sec: 5
+  ladder_max_steps: 3
+  entry_abandon_sec: 30
+
+exits:
+  profit_target_pct: {93: 60, 95: 80, 97: 100}
+  hard_stop_pct: 50
+  time_stop: "15:15:00"
+  force_flat: "15:45:00"
+  structure_stop: true
+
+data:
+  bar_seconds: 60
+  snapshot_path: state/snapshot.json
+  trade_log_path: state/trades.jsonl
+  decision_log_path: state/decisions.jsonl
