@@ -123,6 +123,23 @@ with left:
 
 # --- macro panel ------------------------------------------------------
 with right:
+    st.subheader("Order book")
+    book = (snap.get("score") or {}).get("book")
+    if book:
+        bc = st.columns(3)
+        i_val = book.get("imbalance", 0.0)
+        bc[0].metric("Imbalance I", f"{i_val:+.2f}",
+                     help="(Vbid − Vask)/(Vbid + Vask), EWMA. + = buyers stacked; − = the floor is fake")
+        bc[1].metric("Depth", f"{book.get('depth', 0):,.0f}",
+                     help=f"displayed inside size vs median {book.get('depth_median', 0):,.0f}")
+        thinning = book.get("thinning", False)
+        bc[2].metric("Liquidity", "THINNING ⚠️" if thinning else "normal")
+        if thinning:
+            st.warning("Inside depth collapsing — liquidity disappears right before "
+                       "the move everyone calls unexpected. Entries gated.", icon="🫥")
+    else:
+        st.caption("Book warming up (needs ~30 quote samples).")
+
     st.subheader("Macro cluster")
     macro = snap.get("macro") or {}
     if macro:

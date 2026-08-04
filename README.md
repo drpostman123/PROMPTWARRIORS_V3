@@ -80,8 +80,14 @@ godmode0dte/
 width filter fail, event blackout (FOMC day = full lockout), forced-bias
 conflict, extreme vol regime / VIX > 32, counter-regime signal, leg
 liquidity/OI/staleness failures, **one-shot rule** (a losing trade closes that
-direction for the day). Entries only 09:50–11:30 ET — the regime layer needs
-four closed 5-minute bars, and late breakouts underperform.
+direction for the day), and the **order-book layer**: L1 imbalance
+`I = (V_bid − V_ask)/(V_bid + V_ask)` stacked against the trade beyond ±0.30,
+or inside depth thinning below 35% of its rolling median (liquidity vanishes
+right before the move everyone calls unexpected). The book is gate-only —
+zero score weight — until `scripts/backtest_imbalance.py`, run against the
+system's own logged bars, shows a positive logistic slope at p < 0.05 with
+n ≥ 200 (the spec's earn-your-weight test). Entries only 09:50–11:30 ET — the
+regime layer needs four closed 5-minute bars, and late breakouts underperform.
 
 **Sizing is phased** (spec §2.1): launch is a flat **2%** of equity per trade.
 The 3%/4% tiers for 97+ scores unlock only after ≥ 200 logged outcomes show

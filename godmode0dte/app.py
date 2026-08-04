@@ -218,6 +218,7 @@ class GodModeApp:
             self.md.macro.confirmation_points(direction, self.cfg.signal.weights.macro_cluster)
             if direction is not None else (0.0, "no direction")
         )
+        book_state = self.md.book.state() if self.md.book.ready else None
         score = self.scorer.score(ScoringInputs(
             bars_1m=bars,
             direction=direction,
@@ -234,6 +235,7 @@ class GodModeApp:
             short_leg_quote=build.short_quote if build else None,
             max_leg_spread_pct=self.cfg.execution.max_leg_spread_pct_of_mid,
             min_open_interest_ok=build is not None and build.vertical is not None,
+            book=book_state,
             now=now,
         ))
         self.last_score_snapshot = {
@@ -246,8 +248,18 @@ class GodModeApp:
             "gates": list(score.hard_gate_failures),
             "regime": regime_state.regime.value,
             "vol_regime": regime_state.vol_regime.value,
+            "book": {
+                "imbalance": book_state.imbalance,
+                "imbalance_raw": book_state.imbalance_raw,
+                "depth": book_state.depth,
+                "depth_median": book_state.depth_median,
+                "thinning": book_state.thinning,
+            } if book_state else None,
         }
-        self.store.log_decision({"kind": "score", **self.last_score_snapshot})
+        # price + rel_volume ride along so scripts/backtest_imbalance.py can
+        # compute forward returns and run the earn-your-weight logistic test.
+        self.store.log_decision({"kind": "score", "price": price, "rel_volume": round(rel, 3),
+                                 **self.last_score_snapshot})
 
         if score.total < self.cfg.signal.min_score or not score.tradeable:
             return

@@ -122,6 +122,15 @@ class SignalConfig(BaseModel):
     # >=40 same-weekday outcomes with binomial p<0.05).
     dow_points: dict[str, int] = Field(default={"mon": 0, "tue": 0, "wed": 0, "thu": 0, "fri": 0})
 
+    # Order-book layer (L1). Zero score weight — logged for calibration; acts
+    # as an execution-hazard gate only. I = (Vbid - Vask) / (Vbid + Vask).
+    book_gate_enabled: bool = True
+    book_conflict_threshold: float = Field(0.30, ge=0, le=1,
+                                           description="Gate when EWMA imbalance opposes direction beyond this.")
+    book_ewma_alpha: float = Field(0.10, gt=0, le=1)
+    book_thin_frac: float = Field(0.35, gt=0, le=1,
+                                  description="Gate when displayed depth < this x rolling median (liquidity thinning).")
+
 
 class EventConfig(BaseModel):
     blackout_before_min: int = Field(30, description="No entries this many minutes before high-impact events.")

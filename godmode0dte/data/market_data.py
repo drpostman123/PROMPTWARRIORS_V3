@@ -18,6 +18,7 @@ from typing import Optional
 from godmode0dte.config import AppConfig
 from godmode0dte.data.macro import MacroCluster
 from godmode0dte.features.bars import BarAggregator
+from godmode0dte.features.orderbook import BookPulse
 from godmode0dte.models import Quote
 from godmode0dte.monitoring.logging import get_logger
 
@@ -35,6 +36,8 @@ class MarketDataHub:
         self.quotes: dict[str, Quote] = {}
         self.deltas: dict[str, float] = {}          # streamer symbol -> delta
         self.open_interest: dict[str, int] = {}     # streamer symbol -> OI
+        self.book = BookPulse(ewma_alpha=cfg.signal.book_ewma_alpha,
+                              thin_frac=cfg.signal.book_thin_frac)
         self._option_symbols: set[str] = set()
         self._streamer = None
         self._session = None
@@ -90,6 +93,8 @@ class MarketDataHub:
                 bid_size=float(q.bid_size or 0), ask_size=float(q.ask_size or 0), ts=now,
             )
             self.quotes[q.event_symbol] = quote
+            if q.event_symbol == self.underlying:
+                self.book.update(quote.bid_size, quote.ask_size, now)
             if q.event_symbol in reverse_macro and bid > 0:
                 self.macro.update(reverse_macro[q.event_symbol], quote.mid, now)
 

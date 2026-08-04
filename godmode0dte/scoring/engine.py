@@ -27,6 +27,7 @@ from godmode0dte.config import SignalConfig
 from godmode0dte.data.calendar import EventVerdict
 from godmode0dte.features.indicators import adx, ema, rsi, vwap
 from godmode0dte.features.bars import resample
+from godmode0dte.features.orderbook import BookState
 from godmode0dte.models import (
     Bar, Direction, Quote, Regime, RegimeState, ScoreComponent, SetupScore, VolRegime,
 )
@@ -49,6 +50,7 @@ class ScoringInputs:
     short_leg_quote: Optional[Quote]
     max_leg_spread_pct: float             # from execution config
     min_open_interest_ok: bool
+    book: Optional[BookState] = None      # L1 imbalance — logged; gate-only, zero weight
     now: Optional[datetime] = None
 
 
@@ -80,6 +82,17 @@ class ScoreEngine:
             gates.append("long signal against trend-down regime")
         if direction is Direction.SHORT and inp.regime.regime is Regime.TREND_UP:
             gates.append("short signal against trend-up regime")
+        # Order-book gates (execution hazard, zero score weight — spec §1.2 rule).
+        if self._cfg.book_gate_enabled and inp.book is not None and direction is not None:
+            i = inp.book.imbalance
+            against = -i if direction is Direction.LONG else i
+            if against > self._cfg.book_conflict_threshold:
+                gates.append(f"book stacked against direction (I={i:+.2f})")
+            if inp.book.thinning:
+                gates.append(
+                    f"liquidity thinning: depth {inp.book.depth:.0f} < "
+                    f"{self._cfg.book_thin_frac:.0%} of median {inp.book.depth_median:.0f}"
+                )
 
         # ---- components ---------------------------------------------------
         comps.append(self._score_opening_range(inp, w.opening_range))

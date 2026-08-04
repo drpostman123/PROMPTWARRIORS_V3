@@ -46,6 +46,14 @@ signal:
   vix_hard_max: 32
   dow_points: {mon: 0, tue: 0, wed: 0, thu: 0, fri: 0}   # earn weight via calibration only
 
+  # Order-book layer: I = (Vbid - Vask)/(Vbid + Vask) at the inside market.
+  # Zero score weight (logged every bar; run scripts/backtest_imbalance.py to
+  # test whether it earns points). Gates fire on conflict or thinning.
+  book_gate_enabled: true
+  book_conflict_threshold: 0.30   # gate when EWMA I opposes the trade beyond this
+  book_ewma_alpha: 0.10
+  book_thin_frac: 0.35            # gate when depth < 35% of rolling median
+
 events:
   blackout_before_min: 30
   blackout_after_min: 15
