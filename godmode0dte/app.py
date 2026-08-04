@@ -322,12 +322,17 @@ class GodModeApp:
         price = self.md.underlying_price() or last.close
 
         bars5 = resample(bars, 5, drop_partial=True)
-        atr5 = float(atr(bars5, 14)[-1]) if len(bars5) >= 15 else 0.0
+        # Warmup context (first-15-min doctrine): prior-session + premarket 5m
+        # candles prepend today's bars so ATR14 and the regime features are
+        # calibrated at 09:35, not ~10:45. Empty warmup degrades gracefully —
+        # the 15-bar regime floor then simply arms later.
+        bars5_ctx = self.md.warm_bars_5m + bars5
+        atr5 = float(atr(bars5_ctx, 14)[-1]) if len(bars5_ctx) >= 15 else 0.0
         width_ok, width_reason = self.or_tracker.width_ok(price, atr5)
         rel = self.rel_volume.ratio(last, bars)
         direction, evidence = self.or_tracker.classify_breakout(last, rel)
 
-        regime_state = self.regime.classify(bars5, self.md.macro.vix)
+        regime_state = self.regime.classify(bars5_ctx, self.md.macro.vix)
         event_verdict = self.calendar.evaluate(now, self.cfg.signal.weights.event_sentiment)
         if event_verdict.forced_bias is not None and direction is not None:
             if direction != event_verdict.forced_bias:

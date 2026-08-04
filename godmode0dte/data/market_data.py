@@ -4,6 +4,9 @@ One streamer session feeds:
   - underlying trades  -> BarAggregator (1m bars)
   - underlying + macro quotes -> latest quote cache / MacroCluster
   - option quotes for candidate legs -> quote cache with staleness stamps
+  - historical 5m candles (prior session + premarket) -> indicator warmup,
+    so ATR14/EMA/regime are REAL at 09:35 instead of arming ~10:45 — the
+    first 15 minutes after the open are the window this system hunts.
 
 The feed layer knows nothing about signals or orders — it only publishes
 data into in-memory stores the feature layer reads.
@@ -12,11 +15,30 @@ data into in-memory stores the feature layer reads.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time as dtime, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 from godmode0dte.models import Bar
+
+
+def prior_session_date(today: date) -> date:
+    """Previous weekday (holiday-naive: on a holiday the warmup comes back
+    empty and the system degrades to the session-only arming path)."""
+    d = today - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def in_warmup_window(ts: datetime, today: date, tz: ZoneInfo) -> bool:
+    """Candles eligible for warmup: prior-session RTH (09:30-16:00 ET) and
+    TODAY'S premarket (04:00-09:30 ET). Overnight/weekend candles are
+    excluded — their vol regime would drag ATR toward fiction."""
+    local = ts.astimezone(tz)
+    if local.date() == today:
+        return dtime(4, 0) <= local.time() < dtime(9, 30)
+    return dtime(9, 30) <= local.time() < dtime(16, 0)
 
 from godmode0dte.config import AppConfig
 from godmode0dte.data.macro import MacroCluster
@@ -49,6 +71,8 @@ class MarketDataHub:
         self._stopped = False
         self._generation = 0
         self._restart_lock = asyncio.Lock()
+        self.warm_bars_5m: list[Bar] = []       # prior-session RTH + today's premarket
+        self.warmup_done = asyncio.Event()
 
     # -- lifecycle -----------------------------------------------------
 
@@ -61,8 +85,47 @@ class MarketDataHub:
             asyncio.create_task(self._supervised(self._trade_loop), name="md-trades"),
             asyncio.create_task(self._supervised(self._greeks_loop), name="md-greeks"),
             asyncio.create_task(self._supervised(self._summary_loop), name="md-summary"),
+            asyncio.create_task(self._warmup_candles(), name="md-warmup"),
         ]
         log.info("market_data_started", underlying=self.underlying)
+
+    async def _warmup_candles(self) -> None:
+        """One-shot backfill: prior-session + premarket 5m candles via DXLink,
+        so every ATR/EMA-based feature is calibrated at the opening bell.
+
+        Fully guarded — on any failure the warmup list stays empty and the
+        system degrades to session-only arming (~10:45), never crashes."""
+        try:
+            from tastytrade.dxfeed import Candle as DXCandle
+            today = datetime.now(self._tz).date()
+            start = datetime.combine(prior_session_date(today), dtime(9, 30), tzinfo=self._tz)
+            session_open_utc = datetime.combine(today, dtime(9, 30),
+                                                tzinfo=self._tz).astimezone(timezone.utc)
+            await self._streamer.subscribe_candle([self.underlying], interval="5m",
+                                                  start_time=start, extended_trading=True)
+            collected: dict[datetime, Bar] = {}
+            deadline = asyncio.get_event_loop().time() + 60.0
+            async for c in self._streamer.listen(DXCandle):
+                raw_ts = int(getattr(c, "time", 0) or 0)
+                ts = datetime.fromtimestamp(raw_ts / 1000.0, tz=timezone.utc)
+                if ts >= session_open_utc:
+                    break                            # caught up to today's session
+                if in_warmup_window(ts, today, self._tz) and c.close:
+                    collected[ts] = Bar(ts=ts, open=float(c.open), high=float(c.high),
+                                        low=float(c.low), close=float(c.close),
+                                        volume=float(c.volume or 0))
+                if asyncio.get_event_loop().time() > deadline:
+                    break
+            self.warm_bars_5m = [collected[k] for k in sorted(collected)]
+            log.info("warmup_candles_loaded", bars=len(self.warm_bars_5m))
+            try:
+                await self._streamer.unsubscribe_candle(self.underlying, interval="5m")
+            except Exception:                        # noqa: BLE001 — cosmetic
+                pass
+        except Exception as e:                       # noqa: BLE001 — degrade, never die
+            log.warning("warmup_candles_failed", error=str(e))
+        finally:
+            self.warmup_done.set()
 
     async def _connect(self) -> None:
         """(Re)build the streamer and re-establish every subscription."""

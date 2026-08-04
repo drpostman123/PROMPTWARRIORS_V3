@@ -40,7 +40,7 @@ signal:
   min_close_location: 0.75
   max_chase_frac: 0.50        # G-S4: refuse breakouts already >50% of OR width past the edge
   breakout_decay_min: 30      # breakout points decay to zero over 30 minutes
-  entry_window_start: "09:50:00"   # regime needs 4 closed 5m bars
+  entry_window_start: "09:36:00"   # first-15-min doctrine; candle warmup arms the gates at the bell
   entry_window_end: "11:30:00"
   min_regime_confidence: 0.70
   vix_sweet_low: 14

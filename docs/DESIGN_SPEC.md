@@ -517,3 +517,18 @@ Shipped bundle: deploy/ (hardened systemd units, mandatory pre-market
 restart timer with ET-aware OnCalendar, logrotate, runbook) and seven new
 test files (governor check order, exit priority matrix, boot adoption,
 breaker state edges, OR gap days, resample anchoring, risk property tests).
+
+## Operator override: first-15-minute entry window (applied)
+
+The operator directed that the best 0DTE trades occur in the first 15
+minutes after the open, overriding the arbitrated 09:50 start. Root-cause
+review agreed the real blocker was indicator blindness, not early entries:
+the 09:50/10:45 arming existed only because ATR14/EMA/regime were computed
+from session bars alone. Resolution: the data hub now backfills prior-session
+RTH and same-day premarket 5m candles via DXLink at boot (holiday-naive,
+fully guarded); warmup bars prepend session bars for regime classification
+and ATR context, so every ATR-normalized gate is calibrated when the opening
+range completes. entry_window_start moved to 09:36. Failure mode is explicit:
+an empty warmup leaves the 15-bar regime floor in charge and entries arm
+late — the gate degrades toward caution, never past it. All other gates
+(score >= 93, OR width, chase, RVOL, book, events, risk caps) are unchanged.

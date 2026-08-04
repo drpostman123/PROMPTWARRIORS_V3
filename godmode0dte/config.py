@@ -108,8 +108,14 @@ class SignalConfig(BaseModel):
     adx_period: int = 14
     adx_floor: float = 20.0
 
-    # Entry window (ET). 09:50 start: regime needs 4 closed 5m bars (spec §arbitration).
-    entry_window_start: time = time(9, 50)
+    # Entry window (ET). Opens 09:36 — the minute after the opening range
+    # completes. The original 09:50 arbitration existed because regime features
+    # were blind before 4 closed session bars; the prior-session/premarket
+    # candle warmup removes that blindness, so the first-15-minute breakouts
+    # (the best 0DTE moves) are in play WITH fully calibrated gates. If the
+    # warmup fails (holiday, feed issue) the regime floor still holds entries
+    # back until session bars suffice — the gate degrades, never the safety.
+    entry_window_start: time = time(9, 36)
     entry_window_end: time = time(11, 30)
 
     # Regime

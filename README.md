@@ -86,8 +86,13 @@ or inside depth thinning below 35% of its rolling median (liquidity vanishes
 right before the move everyone calls unexpected). The book is gate-only —
 zero score weight — until `scripts/backtest_imbalance.py`, run against the
 system's own logged bars, shows a positive logistic slope at p < 0.05 with
-n ≥ 200 (the spec's earn-your-weight test). Entries only 09:50–11:30 ET — the
-regime layer needs four closed 5-minute bars, and late breakouts underperform.
+n ≥ 200 (the spec's earn-your-weight test). Entries run **09:36–11:30 ET** —
+the minute after the opening range completes, because the best 0DTE breakouts
+happen in the first 15 minutes. That early window is only honest because the
+data hub backfills prior-session and premarket 5-minute candles at boot, so
+ATR14, the EMAs, and the regime features are fully calibrated at the bell; if
+the warmup fails, the regime floor holds entries back until session bars
+suffice — the gate degrades, never the safety.
 
 **Sizing is phased** (spec §2.1): launch is a flat **2%** of equity per trade.
 The 3%/4% tiers for 97+ scores unlock only after ≥ 200 logged outcomes show
