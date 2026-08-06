@@ -41,8 +41,11 @@ class CircuitBreaker:
         self._trip_reason: str = ""
         self._lockout_path = Path(cfg.lockout_file)
         self._baseline_path = self._lockout_path.with_name("baseline.json")
+        self._peak_path = self._lockout_path.with_name("peak.json")
+        self._peak: float = 0.0
         self._restore_lockout()
         self._restore_baseline()
+        self._restore_peak()
 
     # -- lifecycle -----------------------------------------------------
 
@@ -71,13 +74,65 @@ class CircuitBreaker:
             log.error("breaker_baseline_unreadable")
 
     def check(self, current_equity: float) -> BreakerState:
-        """Evaluate the daily loss limit. Called on every equity update."""
+        """Evaluate the daily loss limit AND the survival rule (drawdown from
+        all-time peak). Called on every equity update."""
+        if current_equity > 0:
+            self._update_peak(current_equity)
         if self._state is not BreakerState.ARMED or self._starting_equity is None:
             return self._state
         drawdown_pct = 100.0 * (self._starting_equity - current_equity) / self._starting_equity
         if drawdown_pct >= self._cfg.daily_loss_limit_pct:
             self.trip(f"daily loss {drawdown_pct:.2f}% >= {self._cfg.daily_loss_limit_pct}% limit")
+        # Survival-first rule (round 6): a drawdown from PEAK beyond the
+        # configured limit trips a PERSISTENT lock — it survives restarts and
+        # new sessions, and only GODMODE_ACK_DRAWDOWN=YES re-arms it. This is
+        # the "measurement capital must survive" law, not a daily breaker.
+        if self._peak > 0 and current_equity > 0:
+            dd_peak = 100.0 * (self._peak - current_equity) / self._peak
+            if dd_peak >= self._cfg.max_drawdown_from_peak_pct:
+                self._persist_peak(survival_tripped=True)
+                self.trip(f"SURVIVAL: drawdown from peak {dd_peak:.1f}% >= "
+                          f"{self._cfg.max_drawdown_from_peak_pct}% — persistent lock; "
+                          "re-arm requires GODMODE_ACK_DRAWDOWN=YES after review")
         return self._state
+
+    # -- survival rule persistence -------------------------------------
+
+    def _update_peak(self, equity: float) -> None:
+        if equity > self._peak:
+            self._peak = equity
+            self._persist_peak()
+
+    def _persist_peak(self, survival_tripped: bool = False) -> None:
+        try:
+            self._peak_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"peak": self._peak}
+            if survival_tripped:
+                payload["survival_tripped"] = True
+            self._peak_path.write_text(json.dumps(payload))
+        except OSError as e:
+            log.error("peak_persist_failed", error=str(e))
+
+    def _restore_peak(self) -> None:
+        import os
+        if not self._peak_path.exists():
+            return
+        try:
+            payload = json.loads(self._peak_path.read_text())
+            self._peak = float(payload.get("peak", 0.0))
+            if payload.get("survival_tripped"):
+                if os.environ.get("GODMODE_ACK_DRAWDOWN") == "YES":
+                    # Operator acknowledged: clear the flag, keep the peak.
+                    log.error("survival_lock_acknowledged_and_cleared", peak=self._peak)
+                    self._persist_peak(survival_tripped=False)
+                else:
+                    self._state = BreakerState.LOCKED
+                    self._trip_reason = ("survival lock: drawdown from peak exceeded "
+                                         f"{self._cfg.max_drawdown_from_peak_pct}%; set "
+                                         "GODMODE_ACK_DRAWDOWN=YES to re-arm after review")
+                    log.error("survival_lock_active", peak=self._peak)
+        except (json.JSONDecodeError, ValueError, TypeError, OSError):
+            log.error("peak_file_unreadable")
 
     def trip(self, reason: str) -> None:
         """Trip the breaker. Irreversible for the session."""

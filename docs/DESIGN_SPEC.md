@@ -596,3 +596,17 @@ journal already records the identical code path's every verdict; paper
 mode is the full-pipeline shadow). Deferred to post-gate: volatility-
 scaled risk percentages (touching the caps before PROMOTE is exactly what
 the governance exists to prevent).
+
+## Round 6 (applied): measurement integrity + survival
+
+From the operator's back-desk assessment (whose prediction bands broadly
+match §SMALL_ACCOUNTS; its items 2/3/4 had already shipped in round 5).
+New: (1) ShadowBook (monitoring layer, no broker reference) paper-follows
+every gate-clean untaken signal >= 85 at combo mid through the real exit
+priorities and logs shadow_exit rows with scores — the counterfactual
+outcome stream that makes sub-93 score-bucket calibration possible at
+small-account trade rates; labeled mid_optimistic, an upper bound.
+(2) Survival-first rule: drawdown >= 20% from all-time peak trips a
+PERSISTENT lock (survives restarts and new sessions; peak.json beside the
+lockout file); GODMODE_ACK_DRAWDOWN=YES re-arms after review. The daily
+-6% breaker protects a day; this protects the measurement campaign.

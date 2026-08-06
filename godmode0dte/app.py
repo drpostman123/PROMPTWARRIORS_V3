@@ -73,6 +73,8 @@ class GodModeApp:
         self.md = MarketDataHub(cfg, self.underlying)
         self.or_tracker = OpeningRangeTracker(cfg.signal, cfg.timezone)
         self.exit_engine = ExitEngine(cfg.exits, self.governor, cfg.timezone)
+        from godmode0dte.monitoring.shadow import ShadowBook
+        self.shadow = ShadowBook(cfg, self.store.log_decision)
         self.broker: Optional[Broker] = None
         self.session = None
         self.account = None
@@ -466,6 +468,11 @@ class GodModeApp:
                                  **self.last_score_snapshot})
 
         if score.total < self.cfg.signal.min_score or not score.tradeable:
+            # Shadow the near-misses: sub-93 (but gate-clean) signals are the
+            # calibration data real trading can never produce (round 6).
+            if score.tradeable and build is not None and build.vertical is not None:
+                self.shadow.maybe_open(score.total, build.vertical, build.vertical.debit,
+                                       now, rejection_reason="below_threshold")
             return
         if build is None or build.vertical is None:
             self.store.log_decision({"kind": "reject", "reason": "vertical_build",
@@ -494,6 +501,12 @@ class GodModeApp:
             self._rejection_counts[result.reason] = self._rejection_counts.get(result.reason, 0) + 1
             self.store.log_decision({"kind": "reject", "reason": result.reason,
                                      "detail": result.detail, "score": score.total})
+            # Risk-blocked signals still yield measurement (round 6): shadow
+            # them unless the block was a safety state that should also stop
+            # counterfactual accumulation noise.
+            if result.reason not in ("circuit_breaker", "kill_switch", "entries_disabled"):
+                self.shadow.maybe_open(score.total, build.vertical, build.vertical.debit,
+                                       now, rejection_reason=result.reason)
             return
         await self._enter(result, build)
 
@@ -583,6 +596,10 @@ class GodModeApp:
                     self.breaker.trip("equity feed dead ~30s with open positions")
             try:
                 self._mark_positions()
+                self.shadow.mark_and_exit(
+                    datetime.now(timezone.utc),
+                    datetime.now(self.tz).time(),
+                    lambda occ: self.md.quotes.get(self._streamer_symbol(occ)))
                 decisions = self.exit_engine.evaluate(datetime.now(timezone.utc),
                                                       self.md.underlying_price())
                 for d in decisions:
@@ -682,6 +699,7 @@ class GodModeApp:
                 "account_type": self.cfg.risk.account_type,
                 "entries_disabled": self.governor.entries_disabled_reason,
                 "rejection_counts": dict(self._rejection_counts),
+                "shadow_open": self.shadow.open_count,
                 "score": self.last_score_snapshot,
                 "macro": self.md.macro.snapshot(),
                 "positions": [p for p in self.governor.open_positions],

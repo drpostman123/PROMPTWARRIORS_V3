@@ -178,3 +178,23 @@ H1: p = breakeven + 7pts; α=0.05, β=0.20) plus a Beta-posterior
 requirement P(p > breakeven + 3pts) ≥ 0.95, n ≥ 60. It is peeking-safe:
 run it after every trade if you like. It has three verdicts, and one of
 them is REJECT — which means stop trading the edge, not collect more data.
+
+## 8. Round 6: measurement integrity and survival
+
+**Shadow outcome book** (`monitoring/shadow.py`, on by default): every
+gate-clean signal scoring ≥ 85 that does NOT become a real fill — sub-93,
+daily cap, heat, one-shot, size_zero — is paper-followed at the combo MID
+through the same exit rules, and its outcome lands in the decision log as a
+`shadow_exit` row with the score attached. At 3–6 real trades a month, this
+is where the calibration sample actually comes from: the score buckets
+BELOW the threshold, which live trading can never populate. Every shadow
+row is labeled `fill_basis: mid_optimistic` — shadow results are an UPPER
+bound on the edge, never proof.
+
+**Survival-first rule** (`max_drawdown_from_peak_pct: 20`): a 20% drawdown
+from ALL-TIME peak equity trips a lock that — unlike the daily breaker —
+**persists across days and restarts**. Re-arming requires the operator to
+set `GODMODE_ACK_DRAWDOWN=YES` after reading the edge reports, which is the
+system forcing the conversation the operator least wants to have. The first
+$3–5k is measurement capital: tier changes come from deposits, not from
+hoping the compounding tables in §3 are wrong.

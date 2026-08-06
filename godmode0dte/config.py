@@ -53,6 +53,13 @@ class RiskConfig(BaseModel):
     account_type: Literal["margin_small", "margin_large", "cash"] = "margin_large"
     day_trades_per_5d: int = Field(3, ge=0)
     day_trade_file: str = "state/day_trades.json"
+    # Survival-first capital rule (round 6): drawdown from PEAK equity beyond
+    # this percentage trips a PERSISTENT lock that survives restarts and new
+    # sessions — re-arming requires the operator to set GODMODE_ACK_DRAWDOWN=YES
+    # after reading the edge reports. Measurement capital must survive long
+    # enough for the measurement to matter.
+    # (peak state persists next to the lockout file as peak.json)
+    max_drawdown_from_peak_pct: float = Field(20.0, gt=0, le=50.0)
     max_data_staleness_sec: float = Field(5.0, gt=0, description="Reject intents on stale quotes.")
     min_intent_spacing_sec: float = Field(60.0, ge=0, description="Burst protection between intents.")
     lockout_file: str = "state/lockout.json"
@@ -150,6 +157,16 @@ class SignalConfig(BaseModel):
     # Day-of-week points: zero-weighted by default (spec: activatable only after
     # >=40 same-weekday outcomes with binomial p<0.05).
     dow_points: dict[str, int] = Field(default={"mon": 0, "tue": 0, "wed": 0, "thu": 0, "fri": 0})
+
+    # Shadow outcome tracking (round 6): signals that score well but never
+    # fill (below 93, or blocked by daily cap / heat / one-shot) produce no
+    # outcome data — calibration starves at small-account trade rates. The
+    # shadow book paper-follows them through the same exit rules and logs
+    # shadow_exit rows, multiplying the measurement rate without one cent
+    # of risk. Monitoring layer only: it can never place an order.
+    shadow_tracking: bool = True
+    shadow_min_score: float = Field(85.0, ge=0, le=100)
+    shadow_max_open: int = Field(6, ge=1, le=20)
 
     # Order-book layer (L1). Zero score weight — logged for calibration; acts
     # as an execution-hazard gate only. I = (Vbid - Vask) / (Vbid + Vask).
