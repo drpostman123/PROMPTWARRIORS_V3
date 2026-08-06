@@ -11,7 +11,18 @@ risk:
   max_heat_pct: 7.0
   max_concurrent_positions: 2
   daily_loss_limit_pct: 6.0
-  min_equity: 2000
+  # 1 SPY contract at worst fill $0.90 + $2.60 fees = $92.60 needs $2,315 at
+  # the 4% cap; below ~$3,000 the account has no margin for a losing day.
+  min_equity: 3000
+  allow_one_lot_minimum: true     # ladder target can't fit 1 lot but the 4% cap can -> take 1, log overshoot
+  fee_floor_mult: 5.0             # reject trades whose target gain < 5x round-trip friction
+  daily_trade_cap: 3              # spec 2.3: max approvals per session
+  # PDT was eliminated effective 2026-06-04 (18-month broker phase-in through
+  # Oct 2027). margin_large = no self-imposed day-trade budget (default).
+  # Set margin_small if YOUR broker still enforces a counter (verify live).
+  account_type: margin_large
+  day_trades_per_5d: 3
+  day_trade_file: state/day_trades.json
   max_data_staleness_sec: 5
   min_intent_spacing_sec: 60
   lockout_file: state/lockout.json

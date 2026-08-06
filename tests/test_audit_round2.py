@@ -112,11 +112,12 @@ def test_sizing_uses_cap_price_not_mid(cfg, governor):
     cfg.risk.sizing_ladder = {93: 1.0}                       # Phase C worst case
     r = governor.evaluate(make_intent(score=99.0, debit=1.0, contracts=1000))
     assert isinstance(r, ApprovedTrade)
-    # cap = min(1.10, 0.45*2.0) = 0.90; risk accounted at cap, and even a
-    # worst-case fill at cap stays within 4%.
+    # cap = min(1.10, 0.45*2.0) = 0.90; risk accounted at cap PLUS round-trip
+    # friction (round 4), and even a worst-case fill stays within 4%.
     assert r.cap_price == pytest.approx(0.90)
-    assert r.risk_dollars == pytest.approx(r.vertical.contracts * 0.90 * 100)
-    assert r.vertical.contracts * r.cap_price * 100 <= 100_000 * 0.04 + 1e-6
+    per = 0.90 * 100 + cfg.execution.friction_per_contract
+    assert r.risk_dollars == pytest.approx(r.vertical.contracts * per)
+    assert r.risk_dollars <= 100_000 * 0.04 + 1e-6
 
 
 # ---- U3: regime rules ------------------------------------------------------

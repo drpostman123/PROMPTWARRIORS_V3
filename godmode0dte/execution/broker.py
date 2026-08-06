@@ -155,10 +155,24 @@ class TastytradeBroker(Broker):
 
     async def equity(self) -> float:
         balances = await self._account.a_get_balances(self._session)
+        # Option buying power can be lower than net-liq (pending orders,
+        # other positions); the governor sizes from min(net-liq, BP).
+        # Field name VERIFY-LIVE: None keeps the BP check inactive.
+        bp = getattr(balances, "derivative_buying_power", None)
+        self.buying_power_hint = float(bp) if bp is not None else None
         return float(balances.net_liquidating_value)
 
     async def positions(self) -> list:
         return await self._account.a_get_positions(self._session)
+
+    @staticmethod
+    def _classify_rejection(reason: str) -> str:
+        low = reason.lower()
+        if "buying power" in low or "margin" in low or "insufficient" in low:
+            return "buying_power"
+        if "day trade" in low or "pattern" in low:
+            return "day_trade"
+        return "other"
 
     # ---- order-lifecycle doctrine (audit R3 #2): never two live orders for
     # one trade, never a blind rung over an unresolved order, never a
@@ -220,6 +234,8 @@ class TastytradeBroker(Broker):
         from tastytrade.order import NewOrder, OrderAction, OrderTimeInForce, OrderType
 
         v = approved.vertical
+        self.last_rejection_class = None
+        self.last_rejection_reason = ""
         state, px_rem = await self._check_remembered(approved.trade_id)
         if state == "filled":
             return Fill(approved.trade_id, px_rem, datetime.now(timezone.utc))
@@ -279,6 +295,16 @@ class TastytradeBroker(Broker):
                 )
                 resp = await self._account.a_place_order(self._session, order, dry_run=False)
                 placed = resp.order
+                # Broker-side rejection (round 4): never remember it, never
+                # await it — classify (BP/day-trade/other) and stop, so the
+                # app can latch entries off instead of retrying all morning.
+                if str(getattr(placed, "status", "")).upper().endswith("REJECTED"):
+                    reason = str(getattr(resp, "errors", "") or getattr(placed, "reject_reason", ""))
+                    self.last_rejection_class = self._classify_rejection(reason)
+                    self.last_rejection_reason = reason[:200]
+                    log.error("entry_broker_rejected", trade_id=approved.trade_id,
+                              rejection_class=self.last_rejection_class, reason=reason[:200])
+                    return None
                 self._live_orders[approved.trade_id] = (placed.id, px)
                 if await self._await_fill(placed, self._cfg.ladder_step_wait_sec):
                     del self._live_orders[approved.trade_id]

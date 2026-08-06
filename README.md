@@ -94,10 +94,15 @@ ATR14, the EMAs, and the regime features are fully calibrated at the bell; if
 the warmup fails, the regime floor holds entries back until session bars
 suffice — the gate degrades, never the safety.
 
-**Sizing is phased** (spec §2.1): launch is a flat **2%** of equity per trade.
-The 3%/4% tiers for 97+ scores unlock only after ≥ 200 logged outcomes show
-score→hit-rate monotonicity (Wilson lower bound above breakeven). The 4%
-per-trade cap is the compiled ceiling in every phase.
+**Sizing is phased** (spec §2.1): launch is a flat **2%** of equity per trade,
+with a one-lot minimum under the 4% cap for small accounts and a worst-case-day
+gate that makes the −6% daily limit unreachable by stacking. The 3%/4% tiers
+for 97+ scores unlock only after ≥ 200 logged outcomes show score→hit-rate
+monotonicity (Wilson lower bound above breakeven) — `edge_report.py` prints the
+PHASE-B GATE verdict. Phase B/C is calibration governance, not a small-account
+yield lever: see [`docs/SMALL_ACCOUNTS.md`](docs/SMALL_ACCOUNTS.md) for the
+honest arithmetic of running this from a low starting balance (use
+`config/config.small.yaml`).
 
 ### Exit priority (spec §7 — first hit wins, strict pre-emption)
 

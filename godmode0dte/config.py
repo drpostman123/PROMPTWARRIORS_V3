@@ -31,7 +31,28 @@ class RiskConfig(BaseModel):
     max_heat_pct: float = Field(7.0, gt=0, le=HARD_MAX_HEAT_PCT)
     max_concurrent_positions: int = Field(2, ge=1, le=HARD_MAX_CONCURRENT)
     daily_loss_limit_pct: float = Field(6.0, gt=0, le=HARD_DAILY_LOSS_LIMIT_PCT)
-    min_equity: float = Field(2_000.0, ge=0, description="Refuse to trade below this account equity.")
+    # 1 SPY contract at worst fill $0.90 + $2.60 fees = $92.60 needs $2,315 at
+    # the 4% cap; two concurrent 1-lots under 7% heat need $2,646; a -6% day
+    # from $3,000 leaves $2,820 — still tradeable. Below 3000 the account is
+    # structurally unsizeable and the runtime says so loudly (round-4 audit).
+    min_equity: float = Field(3_000.0, ge=0, description="Refuse to trade below this account equity.")
+    # Small-account minimum unit: when the ladder's target (e.g. 2%) cannot
+    # fit one contract but the HARD 4% cap (incl. friction) can, take 1 and
+    # log the overshoot. Never loosens the cap.
+    allow_one_lot_minimum: bool = True
+    # Fee-aware approval floor: the gross profit target per contract must
+    # clear this multiple of round-trip friction or the trade is junk
+    # economics regardless of the score.
+    fee_floor_mult: float = Field(5.0, ge=1.0)
+    # Spec §2.3: hard daily approval cap and the soft-loss tier.
+    daily_trade_cap: int = Field(3, ge=1)
+    # Day-trade budget. PDT was ELIMINATED effective 2026-06-04 (SEC-approved
+    # 2026-04-14) with an 18-month broker phase-in — margin_large (no budget)
+    # is the default. Set margin_small if YOUR broker still enforces a
+    # counter (VERIFY-LIVE); cash logs the T+1 good-faith-violation caveat.
+    account_type: Literal["margin_small", "margin_large", "cash"] = "margin_large"
+    day_trades_per_5d: int = Field(3, ge=0)
+    day_trade_file: str = "state/day_trades.json"
     max_data_staleness_sec: float = Field(5.0, gt=0, description="Reject intents on stale quotes.")
     min_intent_spacing_sec: float = Field(60.0, ge=0, description="Burst protection between intents.")
     lockout_file: str = "state/lockout.json"
@@ -227,6 +248,21 @@ class AppConfig(BaseModel):
                 "paper_mode is false but GODMODE_CONFIRM_LIVE=YES is not set. "
                 "Live trading requires both the YAML flag and the env var."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _spx_needs_size(self) -> "AppConfig":
+        """SPX is silently unsizeable on small accounts: one contract at the
+        0.45W ladder cap on a 20-wide is ~$900 (+higher index fees). Even the
+        one-lot minimum under the 4% cap needs ~$23k equity (round-4 audit)."""
+        if self.execution.underlying == "SPX":
+            one_lot = 0.45 * self.execution.width_points_spx * 100
+            if self.risk.min_equity * (self.risk.max_trade_risk_pct / 100.0) < one_lot:
+                raise ValueError(
+                    f"underlying SPX needs min_equity >= "
+                    f"{one_lot / (self.risk.max_trade_risk_pct / 100.0):,.0f} "
+                    f"(one contract ~${one_lot:,.0f} at the 4% cap); use SPY"
+                )
         return self
 
 

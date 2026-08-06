@@ -532,3 +532,40 @@ range completes. entry_window_start moved to 09:36. Failure mode is explicit:
 an empty warmup leaves the 15-bar regime floor in charge and entries arm
 late — the gate degrades toward caution, never past it. All other gates
 (score >= 93, OR width, chase, RVOL, book, events, risk caps) are unchanged.
+
+## Audit Round 4 (applied): the small-account reality
+
+An 11-agent loop audited the whole plan against a low-starting-balance,
+high-yield-seeking account. Confirmed and fixed: the $2,000 config floor
+admitted accounts structurally incapable of ever sizing one contract
+(silent death — the dashboard even captioned it "that is the design");
+min_equity is now 3000, the runtime computes the live one-lot floor and
+shows SIZING DEAD on the dashboard, and size_zero rejections state the
+required equity. A one-lot minimum admits one contract under the HARD 4%
+cap (friction included) when the ladder's 2% target can't hold it — intent
+bends, law doesn't. Friction is now inside sized risk (cap-edge accounts
+otherwise lost 4%+fees in cash terms), and a fee-floor check rejects any
+build whose profit target can't clear 5x round-trip friction. The four
+unimplemented spec §2.3 gates shipped: daily trade cap (3/session,
+ledger-persisted), soft-loss half-size tier at -4%, the worst-case-day gate
+(realized day loss + all open risk + new trade must not reach -6% — the one
+genuine over-exposure path found), and BP-aware sizing (min(net-liq, option
+BP), field name VERIFY-LIVE). Broker-side rejections are now classified
+(buying-power / day-trade) and latch entries off for the session instead of
+retrying silently all morning. SPX below its ~$23k one-lot floor is
+rejected at config load.
+
+Day trades: the FINRA PDT rule was verified ELIMINATED effective
+2026-06-04 (SEC-approved 2026-04-14, 18-month broker phase-in to Oct
+2027). The DayTradeBudget ledger therefore ships as an OPT-IN guard
+(account_type: margin_small) for brokers still enforcing during phase-in;
+the default is margin_large (no self-imposed budget). Cash accounts log the
+T+1 good-faith-violation caveat; settled-funds sizing is deferred.
+
+Deliverables: docs/SMALL_ACCOUNTS.md (the honest arithmetic: floors,
+fee-adjusted breakeven, assumption-labeled growth bands, which constraint
+binds at each equity level), config/config.small.yaml profile,
+tests/test_small_account.py, dashboard net-P&L curve + rejection-reason
+counts, and edge_report's PHASE-B GATE verdict (Wilson LB vs after-fee
+p_be + 3pts). Deferred: settled-funds sizing, deposit/withdrawal
+reconciliation (fail-safe today), depth_cap=0 pre-reject.

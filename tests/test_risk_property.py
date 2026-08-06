@@ -25,7 +25,8 @@ def test_random_marks_never_breach_caps_after_approval(cfg, tmp_path):
         # Fresh lockout/baseline dir per trial so random equities never
         # look like a -6% drawdown against a previous trial's baseline.
         cfg.risk.lockout_file = str(tmp_path / f"trial{trial}" / "lockout.json")
-        equity = rng.uniform(5_000.0, 500_000.0)
+        cfg.risk.day_trade_file = str(tmp_path / f"trial{trial}" / "day_trades.json")
+        equity = rng.uniform(500.0, 500_000.0)
         gov = RiskGovernor(cfg, CircuitBreaker(cfg.risk, date(2026, 8, 4)))
         gov.update_equity(equity, datetime.now(UTC))
         for _ in range(4):
@@ -33,6 +34,11 @@ def test_random_marks_never_breach_caps_after_approval(cfg, tmp_path):
                                  debit=round(rng.uniform(0.30, 0.88), 2),
                                  contracts=rng.randint(1, 200))
             result = gov.evaluate(intent)
+            if not isinstance(result, ApprovedTrade) and equity < 1_500:
+                # Round 4: the dead zone must reject with a NAMED reason,
+                # never approve — $1,500 is below every one-lot floor here.
+                assert result.reason in ("size_zero", "equity_floor", "equity_stale",
+                                         "worst_case_day", "heat_cap")
             if isinstance(result, ApprovedTrade):
                 approvals += 1
                 # Hard cap 1: per-trade risk (at the WORST permitted fill).

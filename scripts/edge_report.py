@@ -79,11 +79,36 @@ def payoff_lower_bound(wins: list[float], losses: list[float], z: float = 1.645)
     return w_lb / l_ub
 
 
-def load_exits(path: Path) -> list[dict]:
+def load_rows(path: Path) -> tuple[list[dict], dict]:
+    """(exit rows, trade_id -> entry row)."""
     if not path.exists():
         raise SystemExit(f"no trade log at {path} — the system writes it as it trades")
     rows = [json.loads(l) for l in path.read_text().splitlines() if l]
-    return [r for r in rows if r.get("kind") == "exit"]
+    exits = [r for r in rows if r.get("kind") == "exit"]
+    entries = {r.get("trade_id"): r for r in rows if r.get("kind") == "entry"}
+    return exits, entries
+
+
+def breakeven_win_rate(exits: list[dict], entries: dict,
+                       profit_target_mult: float = 1.65,
+                       stop_frac: float = 0.50) -> tuple[float, float]:
+    """(p_be, friction_frac): the after-fee breakeven win rate at the shipped
+    managed exits. friction_frac = mean(fees / entry stake) from the logs —
+    at 1-lot sizes this shifts breakeven by ~3 points, which is exactly what
+    a small account cannot see on a gross curve."""
+    fracs = []
+    for r in exits:
+        e = entries.get(r.get("trade_id"))
+        if not e:
+            continue
+        v = e.get("vertical") or {}
+        stake = float(e.get("fill", 0)) * float(v.get("contracts", 0)) * 100
+        if stake > 0:
+            fracs.append(float(r.get("fees", 0.0)) / stake)
+    friction_frac = sum(fracs) / len(fracs) if fracs else 0.0
+    win_frac = profit_target_mult - 1.0
+    p_be = (stop_frac + friction_frac) / (win_frac + stop_frac)
+    return p_be, friction_frac
 
 
 def main() -> None:
@@ -93,7 +118,7 @@ def main() -> None:
     ap.add_argument("--window", type=int, default=20, help="recent-window size for decay check")
     args = ap.parse_args()
 
-    exits = load_exits(Path(args.log))
+    exits, entries = load_rows(Path(args.log))
     n = len(exits)
     print(f"trades: {n}\n")
     if n == 0:
@@ -177,6 +202,19 @@ def main() -> None:
               "— tighten sizing_ladder; at the worst plausible edge this is overbetting.")
     elif ladder_pct is not None:
         print(f"VERDICT: OK — ladder {ladder_pct:.2%} <= half of conservative Kelly {half:.2%}.")
+    print()
+
+    # --- Phase-B unlock gate (spec §2.1: Wilson LB >= p_be + 3pts) ---
+    p_be, friction_frac = breakeven_win_rate(exits, entries)
+    print("— Phase-B unlock gate (spec §2.1) —")
+    print(f"after-fee breakeven p_be = {p_be:.3f} (friction {friction_frac:.3%} of stake)")
+    print(f"Wilson 90% LB of hit rate = {p_lb:.3f}   required: >= {p_be + 0.03:.3f}")
+    if n >= 200 and p_lb >= p_be + 0.03:
+        print("PHASE-B GATE: PASS — eligible per the spec's calibration governance "
+              "(also requires logistic slope b>0 at p<0.05; see DESIGN_SPEC §2.1).")
+    else:
+        print(f"PHASE-B GATE: FAIL (n={n}, need >=200 and LB >= p_be+0.03) — "
+              "stay at Phase-A sizing.")
     print()
 
     # --- decay ---

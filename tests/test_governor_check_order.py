@@ -18,6 +18,7 @@ UTC = timezone.utc
 
 
 def make_gov(cfg, equity: float) -> RiskGovernor:
+    cfg.risk.min_equity = 1_500.0   # target the sizing layer, not the equity floor
     gov = RiskGovernor(cfg, CircuitBreaker(cfg.risk, date(2026, 8, 4)))
     gov.update_equity(equity, datetime.now(UTC))
     return gov
@@ -48,7 +49,7 @@ def test_burst_protection_fires_before_sizing(cfg):
     """
     entry_window_now(cfg)
     cfg.risk.min_intent_spacing_sec = 60.0
-    gov = make_gov(cfg, 3_000.0)
+    gov = make_gov(cfg, 2_000.0)   # $92.60 one-lot > $80 = 4% cap: truly unsizeable
     first = gov.evaluate(make_intent(score=99.0, debit=0.20, contracts=10))
     assert isinstance(first, ApprovedTrade)
     second = gov.evaluate(make_intent(score=99.0, debit=1.0, contracts=10))
@@ -61,6 +62,6 @@ def test_control_unsizeable_intent_rejects_size_zero_without_burst(cfg):
     the rejection really is sizing's (one contract at cap 0.90 = $90 >
     $60 = 2% of $3k)."""
     entry_window_now(cfg)                              # spacing stays 0 (conftest)
-    gov = make_gov(cfg, 3_000.0)
+    gov = make_gov(cfg, 2_000.0)   # $92.60 one-lot > $80 = 4% cap: truly unsizeable
     r = gov.evaluate(make_intent(score=99.0, debit=1.0, contracts=10))
     assert isinstance(r, Rejection) and r.reason == "size_zero"

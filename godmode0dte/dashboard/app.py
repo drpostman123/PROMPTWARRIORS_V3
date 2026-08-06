@@ -102,6 +102,17 @@ c[5].metric(snap.get("underlying", "SPY"), f"{snap.get('price') or 0:,.2f}")
 if breaker != "armed":
     st.error(f"⛔ CIRCUIT BREAKER {breaker.upper()} — {snap.get('breaker_reason', '')}", icon="⛔")
 
+if snap.get("sizing_viable") is False:
+    st.error(f"💀 SIZING DEAD: equity ${equity:,.0f} < "
+             f"${snap.get('min_tradeable_equity', 0):,.0f} needed for 1 contract at the "
+             "4% cap — every signal will be rejected until the account is funded.", icon="💀")
+if snap.get("entries_disabled"):
+    st.error(f"🚫 ENTRIES DISABLED THIS SESSION: {snap['entries_disabled']}", icon="🚫")
+rej = snap.get("rejection_counts") or {}
+if rej:
+    st.caption("Rejections this session: " +
+               ", ".join(f"{k} ×{v}" for k, v in sorted(rej.items(), key=lambda x: -x[1])))
+
 left, right = st.columns([3, 2])
 
 # --- score breakdown --------------------------------------------------
@@ -202,7 +213,10 @@ trades = load_trades()
 if not trades.empty:
     exits = trades[trades["kind"] == "exit"].copy()
     if not exits.empty:
-        exits["cum_pnl"] = exits["pnl"].cumsum()
+        # NET of fees — a gross curve flatters exactly the 1-lot accounts
+        # where friction is 3-6% of every win (round-4 honesty item).
+        pnl_col = "pnl_net" if "pnl_net" in exits.columns else "pnl"
+        exits["cum_pnl"] = exits[pnl_col].cumsum()
         fig2 = go.Figure()
         fig2.add_scatter(x=pd.to_datetime(exits["ts"]), y=exits["cum_pnl"],
                          mode="lines+markers", line=dict(color=BLUE, width=2),
@@ -212,7 +226,7 @@ if not trades.empty:
                            paper_bgcolor=SURFACE, plot_bgcolor=SURFACE,
                            font=dict(color=INK_2),
                            xaxis=dict(gridcolor=GRID), yaxis=dict(gridcolor=GRID,
-                           title="cumulative P&L ($)"))
+                           title="cumulative net P&L ($)"))
         st.plotly_chart(fig2, use_container_width=True)
     st.dataframe(trades.tail(50), hide_index=True)
 else:

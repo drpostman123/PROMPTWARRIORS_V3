@@ -14,6 +14,9 @@ from godmode0dte.risk.governor import RiskGovernor
 def cfg(tmp_path) -> AppConfig:
     c = AppConfig()
     c.risk.lockout_file = str(tmp_path / "lockout.json")
+    c.risk.day_trade_file = str(tmp_path / "day_trades.json")
+    c.risk.account_type = "margin_large"    # legacy tests assume no day-trade budget
+    c.risk.daily_trade_cap = 100            # legacy tests approve many times per session
     c.risk.min_intent_spacing_sec = 0
     return c
 

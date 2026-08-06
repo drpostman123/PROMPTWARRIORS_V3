@@ -65,7 +65,9 @@ class ApprovedTrade:
 class RiskGovernor:
     """Sole authority over order flow, sizing, heat, and the breaker."""
 
-    def __init__(self, cfg: AppConfig, breaker: CircuitBreaker) -> None:
+    def __init__(self, cfg: AppConfig, breaker: CircuitBreaker,
+                 day_budget=None) -> None:
+        from godmode0dte.risk.day_trades import DayTradeBudget
         self._cfg = cfg
         self._breaker = breaker
         self._tz = ZoneInfo(cfg.timezone)
@@ -74,7 +76,12 @@ class RiskGovernor:
         self._equity: float = 0.0
         self._equity_ts: Optional[datetime] = None
         self._pending_equity: Optional[tuple[float, int]] = None
+        self._buying_power: Optional[float] = None
         self._kill_switch = False
+        self._entries_disabled_reason: Optional[str] = None
+        self._soft_tier_used = False
+        self._day_budget = day_budget or DayTradeBudget(
+            cfg.risk, datetime.now(self._tz).date())
 
     # -- account state (fed by the runtime, from the broker) -----------
 
@@ -124,6 +131,18 @@ class RiskGovernor:
         self._kill_switch = True
         self._breaker.trip(f"kill switch: {reason}")
 
+    def disable_entries(self, reason: str) -> None:
+        """Session-scoped entry latch (broker BP/day-trade rejection): stops
+        the reject-retry loop; exits keep working; clears on restart."""
+        if self._entries_disabled_reason is None:
+            self._entries_disabled_reason = reason
+            log.error("entries_disabled", reason=reason)
+
+    def update_buying_power(self, bp: Optional[float]) -> None:
+        """Option buying power from the broker; None = unknown (check inactive)."""
+        if bp is not None and bp >= 0:
+            self._buying_power = bp
+
     # -- queries -------------------------------------------------------
 
     @property
@@ -159,6 +178,14 @@ class RiskGovernor:
         return self._kill_switch
 
     @property
+    def day_budget(self):
+        return self._day_budget
+
+    @property
+    def entries_disabled_reason(self) -> Optional[str]:
+        return self._entries_disabled_reason
+
+    @property
     def must_flatten(self) -> bool:
         return self._breaker.state in (BreakerState.TRIPPED, BreakerState.LOCKED) and bool(
             self.open_positions
@@ -181,6 +208,9 @@ class RiskGovernor:
         # 2. Kill switch
         if self._kill_switch:
             return reject("kill_switch", "manual kill switch engaged")
+        # 2b. Session entry latch (broker-side BP/day-trade rejection)
+        if self._entries_disabled_reason is not None:
+            return reject("entries_disabled", self._entries_disabled_reason)
         # 3. Equity sanity
         if self._equity < self._cfg.risk.min_equity:
             return reject("equity_floor", f"equity {self._equity:.2f} < min {self._cfg.risk.min_equity}")
@@ -215,25 +245,70 @@ class RiskGovernor:
             return reject(
                 "max_concurrent", f"{len(self.open_positions)} positions already open"
             )
-        # 9. Per-trade sizing at the WORST permitted fill, not the mid: the
-        # entry ladder may pay up to cap_price, so risk is computed there
-        # (audit U1 — sizing at mid breaches 4% by construction at full ladder).
+        # 8b. Daily trade cap (spec §2.3 #3) + opt-in day-trade budget.
+        if self._day_budget.used_today() >= self._cfg.risk.daily_trade_cap:
+            return reject("daily_trade_cap",
+                          f"{self._day_budget.used_today()} approvals today "
+                          f"(cap {self._cfg.risk.daily_trade_cap})")
+        if not self._day_budget.allows():
+            return reject("day_trade_budget",
+                          f"{self._day_budget.used_in_window()} day trades in rolling "
+                          f"5-business-day window (max {self._cfg.risk.day_trades_per_5d})")
+        # 9a. Fee-aware approval floor (round 4): the gross target gain per
+        # contract must clear a multiple of round-trip friction — a trade
+        # whose win barely pays the fees is junk economics at any score.
         cap_price = min(intent.vertical.debit * 1.10,
                         self._cfg.execution.ladder_cap_pct_of_width * intent.vertical.width)
+        friction = self._cfg.execution.friction_per_contract
+        target_val = min(self._cfg.exits.profit_target_mult * cap_price,
+                         self._cfg.exits.profit_target_width_frac * intent.vertical.width)
+        gross_target_gain = (target_val - cap_price) * 100.0
+        if gross_target_gain < self._cfg.risk.fee_floor_mult * friction:
+            return reject("fee_floor",
+                          f"target gain ${gross_target_gain:.2f}/contract cannot clear "
+                          f"{self._cfg.risk.fee_floor_mult}x round-trip friction ${friction:.2f}")
+        # 9. Per-trade sizing at the WORST permitted fill INCLUDING friction
+        # (audit U1 + round 4): the ladder may pay up to cap_price and the
+        # broker will charge fees on top — real cash loss is what is sized.
+        # BP-aware base: sizing uses min(net-liq, option BP) when BP is known.
+        sizing_equity = min(self._equity, self._buying_power) \
+            if self._buying_power is not None else self._equity
+        per_contract_risk = cap_price * 100.0 + friction
         contracts, risk_dollars = size_trade(
             score=intent.score.total,
-            equity=self._equity,
+            equity=sizing_equity,
             debit_per_share=cap_price,
             contract_multiplier=100,
             cfg=self._cfg.risk,
+            friction_per_contract=friction,
         )
         contracts = min(contracts, intent.vertical.contracts)
-        risk_dollars = contracts * cap_price * 100
+        risk_dollars = contracts * per_contract_risk
         if contracts < 1:
-            return reject("size_zero", "cannot fit one contract under the 4% per-trade cap")
-        # 10. Portfolio heat, also at cap_price
+            cap_dollars = sizing_equity * (self._cfg.risk.max_trade_risk_pct / 100.0)
+            return reject(
+                "size_zero",
+                f"1 contract risks ${per_contract_risk:.2f} > "
+                f"{'the 4% hard cap' if per_contract_risk > cap_dollars else 'ladder target'} "
+                f"at equity ${sizing_equity:,.0f}; need >= "
+                f"${per_contract_risk / (self._cfg.risk.max_trade_risk_pct / 100.0):,.0f}",
+            )
+        # 9b. Soft-loss tier (spec §2.3 #1): realized day drawdown <= -4% ->
+        # at most ONE more approval today, at half size.
+        start_eq = self._breaker.starting_equity or self._equity
+        day_dd = max(0.0, start_eq - self._equity)
+        if start_eq > 0 and day_dd >= 0.04 * start_eq:
+            if self._soft_tier_used:
+                return reject("soft_loss_lockout",
+                              f"day drawdown {100 * day_dd / start_eq:.1f}% >= 4% and the "
+                              "one half-size trade is spent")
+            contracts = contracts // 2
+            if contracts < 1:
+                return reject("soft_loss_tier", "half-size at -4% day cannot fit one contract")
+            risk_dollars = contracts * per_contract_risk
+        # 10. Portfolio heat, at worst fill + friction
         heat_cap = self._equity * (self._cfg.risk.max_heat_pct / 100.0)
-        while contracts >= 1 and self.open_risk_dollars + contracts * cap_price * 100 > heat_cap:
+        while contracts >= 1 and self.open_risk_dollars + contracts * per_contract_risk > heat_cap:
             contracts -= 1
         if contracts < 1:
             return reject(
@@ -241,7 +316,19 @@ class RiskGovernor:
                 f"open risk {self.open_risk_dollars:.0f} + new trade would breach "
                 f"{self._cfg.risk.max_heat_pct}% heat cap",
             )
-        risk_dollars = contracts * cap_price * 100
+        # 11b. Worst-case-day gate (spec §2.3 #6): realized day loss + all
+        # open risk + this trade must not be able to breach the -6% daily
+        # limit — the breaker TRIPS at -6%; this gate makes -6% unreachable.
+        while contracts >= 1 and day_dd + self.open_risk_dollars + contracts * per_contract_risk \
+                > 0.06 * start_eq:
+            contracts -= 1
+        if contracts < 1:
+            return reject(
+                "worst_case_day",
+                f"day dd ${day_dd:.0f} + open risk ${self.open_risk_dollars:.0f} + trade "
+                f"could breach the 6% daily limit of ${0.06 * start_eq:.0f}",
+            )
+        risk_dollars = contracts * per_contract_risk
 
         vertical = VerticalSpec(
             underlying=intent.vertical.underlying,
@@ -265,12 +352,17 @@ class RiskGovernor:
             _token=_APPROVAL_TOKEN,
         )
         self._last_approval_ts = now
+        if start_eq > 0 and day_dd >= 0.04 * start_eq:
+            self._soft_tier_used = True
+        self._day_budget.record()
         log.info(
             "intent_approved",
             trade_id=approved.trade_id,
             contracts=contracts,
             risk_dollars=round(risk_dollars, 2),
+            risk_pct_actual=round(100.0 * risk_dollars / self._equity, 2),
             heat_pct_after=round(100.0 * (self.open_risk_dollars + risk_dollars) / self._equity, 2),
+            approvals_today=self._day_budget.used_today(),
             score=intent.score.total,
         )
         return approved

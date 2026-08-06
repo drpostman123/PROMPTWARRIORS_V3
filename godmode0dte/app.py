@@ -57,7 +57,9 @@ class GodModeApp:
             cfg.exits.stale_flush = time(11, 50)
             cfg.signal.entry_window_end = min(cfg.signal.entry_window_end, time(11, 30))
         self.breaker = CircuitBreaker(cfg.risk, today)
-        self.governor = RiskGovernor(cfg, self.breaker)
+        from godmode0dte.risk.day_trades import DayTradeBudget
+        self.governor = RiskGovernor(cfg, self.breaker,
+                                     day_budget=DayTradeBudget(cfg.risk, today))
         self.machine = StateMachine()
         self.store = StateStore(cfg.data)
         self.calendar = EventCalendar(cfg.events, cfg.timezone)
@@ -81,6 +83,29 @@ class GodModeApp:
         self._equity_failures = 0
         self._eod_done = False
         self._extremes: dict[str, tuple[float, float]] = {}   # trade_id -> (min mark, max mark)
+        self._rejection_counts: dict[str, int] = {}           # reason -> count (this session)
+
+    # -- small-account viability (round 4) ------------------------------
+
+    def min_tradeable_equity(self) -> float:
+        """Equity below which even ONE contract cannot fit under the 4% cap
+        (worst permitted fill + round-trip friction). SPY ~= $2,315."""
+        width = float(self.cfg.execution.width_strikes_spy if self.underlying == "SPY"
+                      else self.cfg.execution.width_points_spx)
+        per_contract_worst = (self.cfg.execution.ladder_cap_pct_of_width * width * 100
+                              + self.cfg.execution.friction_per_contract)
+        return per_contract_worst / (self.cfg.risk.max_trade_risk_pct / 100.0)
+
+    def _check_sizing_viability(self, equity: float) -> bool:
+        """Loud, not silent: an account below the floor boots green but can
+        never trade — say so at ERROR level and on the dashboard."""
+        floor = self.min_tradeable_equity()
+        viable = equity >= floor
+        if not viable and equity > 0:
+            log.error("account_below_min_tradeable_equity",
+                      equity=round(equity, 2), required=round(floor, 2),
+                      detail="every signal will be rejected size_zero until funded")
+        return viable
 
     # ------------------------------------------------------------------
 
@@ -436,6 +461,7 @@ class GodModeApp:
         )
         result = self.governor.evaluate(intent)
         if isinstance(result, Rejection):
+            self._rejection_counts[result.reason] = self._rejection_counts.get(result.reason, 0) + 1
             self.store.log_decision({"kind": "reject", "reason": result.reason,
                                      "detail": result.detail, "score": score.total})
             return
@@ -465,7 +491,16 @@ class GodModeApp:
             self.machine.transition(TradingState.SCANNING, "entry error")
             return
         if fill is None:
-            self.store.log_decision({"kind": "entry_abandoned", "trade_id": approved.trade_id})
+            # Broker-side rejection classification (round 4): a BP/day-trade
+            # class rejection latches entries off for the session so the
+            # reason is visible ONCE instead of a silent retry loop.
+            rej_class = getattr(self.broker, "last_rejection_class", None)
+            if rej_class in ("buying_power", "day_trade"):
+                self.governor.disable_entries(
+                    f"broker rejected order ({rej_class}): "
+                    f"{getattr(self.broker, 'last_rejection_reason', '')}")
+            self.store.log_decision({"kind": "entry_abandoned", "trade_id": approved.trade_id,
+                                     "rejection_class": rej_class})
             self.machine.transition(TradingState.SCANNING, "entry unfilled")
             return
         or_range = self.or_tracker.range
@@ -507,6 +542,9 @@ class GodModeApp:
                 equity = await self.broker.equity() if self.broker else 0.0
                 self._equity_failures = 0
                 self.governor.update_equity(equity, datetime.now(timezone.utc))
+                self.governor.update_buying_power(
+                    getattr(self.broker, "buying_power_hint", None))
+                self._sizing_viable = self._check_sizing_viability(equity)
             except Exception as e:                  # noqa: BLE001
                 self._equity_failures += 1
                 log.error("equity_fetch_failed", error=str(e),
@@ -604,6 +642,13 @@ class GodModeApp:
                 "heat_pct": round(self.governor.heat_pct, 2),
                 "breaker": self.breaker.state.value,
                 "breaker_reason": self.breaker.trip_reason,
+                "sizing_viable": getattr(self, "_sizing_viable", True),
+                "min_tradeable_equity": round(self.min_tradeable_equity(), 2),
+                "approvals_today": self.governor.day_budget.used_today(),
+                "day_trades_in_window": self.governor.day_budget.used_in_window(),
+                "account_type": self.cfg.risk.account_type,
+                "entries_disabled": self.governor.entries_disabled_reason,
+                "rejection_counts": dict(self._rejection_counts),
                 "score": self.last_score_snapshot,
                 "macro": self.md.macro.snapshot(),
                 "positions": [p for p in self.governor.open_positions],
