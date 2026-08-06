@@ -147,3 +147,34 @@ lockout; trade SPX below its floor; turn $2k into meaningful money.
 Under ~$3,300 it is a data logger with a login. Between $3.3k and $25k it
 is a capital-preserving edge-measurement instrument whose realistic
 best case is high-single-digit annual growth. Fund it accordingly.
+
+## 7. V2 addendum: distributions, the proof, and the sequential gate
+
+**Terminal-equity distribution, one year from $5,000** (20,000 simulated
+paths; one-lot regime, debit $0.75, realized winner +40% of debit, loser
+−50%, fees $2.57, 48 trades/yr — every number assumption-labeled per §3):
+
+| True hit rate p | 5th pct | 25th | median | 75th | 95th |
+|---|---|---|---|---|---|
+| 0.45 | $4,157 | $4,359 | $4,562 | $4,697 | $4,899 |
+| 0.55 | $4,494 | $4,697 | $4,832 | $5,034 | $5,237 |
+| 0.65 | $4,832 | $5,034 | $5,169 | $5,304 | $5,574 |
+
+Read the middle row hard: at p=0.55 — a genuinely decent hit rate — the
+**median year loses money** after fees, and the 95th percentile is +5%.
+Even at p=0.65 the median year makes ~3.4%. The distribution's spread is
+small precisely because the risk law works; the risk law cannot manufacture
+expectancy. This is the arithmetic "high yield" collides with.
+
+**The −6% law is now proven, not asserted:** `scripts/mc_risk_proof.py`
+drives thousands of simulated days through the REAL RiskGovernor — pure
+all-lose sequences included (maximum correlation) — and asserts realized
+day loss never exceeds 6% plus fee slack. Current result: 0 violations,
+worst observed day −5.99%. Run it yourself after any config change.
+
+**Phase-B promotion is now a pre-registered sequential test:**
+`scripts/phase_gate.py` runs a Wald SPRT (H0: p = after-fee breakeven,
+H1: p = breakeven + 7pts; α=0.05, β=0.20) plus a Beta-posterior
+requirement P(p > breakeven + 3pts) ≥ 0.95, n ≥ 60. It is peeking-safe:
+run it after every trade if you like. It has three verdicts, and one of
+them is REJECT — which means stop trading the edge, not collect more data.

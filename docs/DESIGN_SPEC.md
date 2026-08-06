@@ -569,3 +569,30 @@ tests/test_small_account.py, dashboard net-P&L curve + rejection-reason
 counts, and edge_report's PHASE-B GATE verdict (Wilson LB vs after-fee
 p_be + 3pts). Deferred: settled-funds sizing, deposit/withdrawal
 reconciliation (fail-safe today), depth_cap=0 pre-reject.
+
+## Round 5 (applied): mathematical enforcement layer
+
+Applied from the operator's advanced-techniques directive, in Python (the
+proposed TypeScript rewrite was declined: it would discard five audit
+rounds and the test suite guarding the risk core for no safety gain).
+Shipped: (1) scripts/mc_risk_proof.py — Monte-Carlo proof of the -6% law
+executed through the real RiskGovernor (worst-case all-lose sequences,
+one-lot granularity, soft tier, fees); 4,000-day runs show 0 violations,
+worst day -5.99%. An in-suite 600-day version runs on every pytest. (2)
+Component fee model (FeeModelConfig: commission/clearing/ORF/SEC-TAF/SPX
+index fees) overwrites the single friction knob at config load; SPY round
+trip prices at $2.57, SPX at $5.17 — the fee floor and sizing now gate on
+computed truth. (3) scripts/phase_gate.py — pre-registered sequential
+Phase-B gate: Wald SPRT (alpha=0.05, beta=0.20, delta=0.07) AND Beta
+posterior P(p > p_be+0.03) >= 0.95 with n >= 60; verdicts
+PROMOTE/CONTINUE/REJECT, peeking-safe, parameters fixed here (changing
+them post hoc is p-hacking). (4) Predictive risk UX: the governor exposes
+projected_day_risk_pct (day drawdown + open risk + one worst-case trade),
+surfaced on the dashboard BEFORE a trade and in a boot self-test that
+names the sizing mode (normal_2pct / one_lot / dead). (5) SMALL_ACCOUNTS
+V2 addendum: simulated terminal-equity distributions at p=0.45/0.55/0.65.
+Declined as redundant: a separate ShadowDecisionEngine (the decision
+journal already records the identical code path's every verdict; paper
+mode is the full-pipeline shadow). Deferred to post-gate: volatility-
+scaled risk percentages (touching the caps before PROMOTE is exactly what
+the governance exists to prevent).

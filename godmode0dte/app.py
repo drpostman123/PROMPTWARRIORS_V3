@@ -107,6 +107,23 @@ class GodModeApp:
                       detail="every signal will be rejected size_zero until funded")
         return viable
 
+    def sizing_mode(self, equity: float) -> str:
+        """Boot self-test classification (round 5): which regime is this
+        account in? normal_2pct | one_lot | dead."""
+        floor = self.min_tradeable_equity()
+        if equity < floor:
+            return "dead"
+        # Ladder target holds a worst-case contract on its own from 2x floor
+        # (Phase-A multiplier 0.5): below that the one-lot rule is doing the work.
+        ladder_mult = min(self.cfg.risk.sizing_ladder.values())
+        return "one_lot" if equity < floor / ladder_mult else "normal_2pct"
+
+    def _worst_case_per_contract(self) -> float:
+        width = float(self.cfg.execution.width_strikes_spy if self.underlying == "SPY"
+                      else self.cfg.execution.width_points_spx)
+        return (self.cfg.execution.ladder_cap_pct_of_width * width * 100
+                + self.cfg.execution.friction_per_contract)
+
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
@@ -124,6 +141,19 @@ class GodModeApp:
             self.broker = PaperBroker(self.cfg.execution, starting_equity=equity)
         else:
             self.broker = TastytradeBroker(self.session, self.account, self.cfg.execution)
+            equity = float((await self.account.a_get_balances(self.session)).net_liquidating_value)
+
+        # Boot self-test (round 5): name the sizing regime out loud.
+        mode = self.sizing_mode(equity)
+        log.info("boot_sizing_selftest",
+                 equity=round(equity, 2), sizing_mode=mode,
+                 one_lot_floor=round(self.min_tradeable_equity(), 2),
+                 friction_per_contract=self.cfg.execution.friction_per_contract,
+                 projected_day_risk_if_trade_pct=round(
+                     100.0 * self._worst_case_per_contract() / equity, 2) if equity > 0 else None)
+        if mode == "dead":
+            log.error("SIZING_DEAD_AT_BOOT", equity=round(equity, 2),
+                      required=round(self.min_tradeable_equity(), 2))
 
         await self.md.start(self.session)
         await self._load_chain()
@@ -644,6 +674,9 @@ class GodModeApp:
                 "breaker_reason": self.breaker.trip_reason,
                 "sizing_viable": getattr(self, "_sizing_viable", True),
                 "min_tradeable_equity": round(self.min_tradeable_equity(), 2),
+                "sizing_mode": self.sizing_mode(self.governor.equity),
+                "projected_day_risk_pct": round(
+                    self.governor.projected_day_risk_pct(self._worst_case_per_contract()), 2),
                 "approvals_today": self.governor.day_budget.used_today(),
                 "day_trades_in_window": self.governor.day_budget.used_in_window(),
                 "account_type": self.cfg.risk.account_type,

@@ -190,18 +190,43 @@ class ExecutionConfig(BaseModel):
     max_combo_spread_spx: float = Field(1.00, description="Combined vertical spread gate, SPX scale.")
     max_contracts_ceiling: int = Field(50, description="Fat-finger ceiling (SPY; SPX uses 5).")
     intent_max_age_sec: float = Field(90.0, description="Abandon entry when the intent is older than this.")
-    # Cost is the one variable you fully control: friction per contract for a
-    # full round trip (2 legs open + 2 legs close: commissions + clearing +
-    # regulatory). Logged on every trade and charged in paper mode so paper
-    # results are never fee-blind. SPX index options run higher — set it.
-    friction_per_contract: float = Field(2.60, ge=0)
-
     # Entry ladder: start at mid, walk toward ask in steps.
     ladder_start_frac: float = Field(0.50, description="0.5 = start at mid of natural/mid range.")
     ladder_step_frac: float = 0.15
     ladder_step_wait_sec: float = 5.0
     ladder_max_steps: int = 3
     entry_abandon_sec: float = 30.0
+    # Cost is the one variable you fully control: friction per contract for a
+    # full round trip (2 legs open + 2 legs close: commissions + clearing +
+    # regulatory). Logged on every trade and charged in paper mode so paper
+    # results are never fee-blind. When fees.use_model is true this value is
+    # OVERWRITTEN at load time by the component model (FeeModelConfig).
+    friction_per_contract: float = Field(2.60, ge=0)
+
+
+class FeeModelConfig(BaseModel):
+    """Component fee model (round 5): the single friction knob decomposed
+    into the actual tastytrade-style schedule so SPY vs SPX and future
+    multi-leg structures price friction correctly. All per-contract,
+    per-leg unless noted. VERIFY-LIVE against your account's fee schedule.
+    """
+
+    use_model: bool = True
+    commission_open: float = Field(1.00, ge=0, description="Per contract to open; $0 to close (tastytrade-style).")
+    commission_close: float = Field(0.00, ge=0)
+    clearing_per_fill: float = Field(0.10, ge=0, description="Per contract, per leg, each direction.")
+    orf: float = Field(0.03, ge=0, description="Options Regulatory Fee, per contract each direction.")
+    sec_taf_close: float = Field(0.05, ge=0, description="SEC + TAF on the closing sell, per contract (approx).")
+    index_fee_spx: float = Field(0.65, ge=0, description="Proprietary index/exchange fee per SPX contract-leg-direction.")
+
+    def per_contract_round_trip(self, underlying: str, legs: int = 2) -> float:
+        """Full round trip for a `legs`-leg defined-risk structure."""
+        per_leg_open = self.commission_open + self.clearing_per_fill + self.orf
+        per_leg_close = self.commission_close + self.clearing_per_fill + self.orf
+        total = legs * (per_leg_open + per_leg_close) + self.sec_taf_close
+        if underlying == "SPX":
+            total += legs * 2 * self.index_fee_spx
+        return round(total, 2)
 
 
 class ExitConfig(BaseModel):
@@ -240,6 +265,16 @@ class AppConfig(BaseModel):
     execution: ExecutionConfig = ExecutionConfig()
     exits: ExitConfig = ExitConfig()
     data: DataConfig = DataConfig()
+    fees: FeeModelConfig = FeeModelConfig()
+
+    @model_validator(mode="after")
+    def _apply_fee_model(self) -> "AppConfig":
+        """Component fees overwrite the single knob so every consumer
+        (sizing, fee floor, paper charging, exit logs) prices the same truth."""
+        if self.fees.use_model:
+            u = self.execution.underlying if self.execution.underlying != "AUTO" else "SPY"
+            self.execution.friction_per_contract = self.fees.per_contract_round_trip(u)
+        return self
 
     @model_validator(mode="after")
     def _live_requires_confirmation(self) -> "AppConfig":

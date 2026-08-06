@@ -185,6 +185,18 @@ class RiskGovernor:
     def entries_disabled_reason(self) -> Optional[str]:
         return self._entries_disabled_reason
 
+    def projected_day_risk_pct(self, per_contract_risk: float) -> float:
+        """Predictive risk (round 5): if ONE more worst-case one-lot trade is
+        taken right now, what fraction of starting-day equity is the maximum
+        day loss (realized drawdown + all open risk + the new trade)?
+        The worst-case-day gate holds this <= 6%; showing it BEFORE the trade
+        beats explaining a rejection after."""
+        start_eq = self._breaker.starting_equity or self._equity
+        if start_eq <= 0:
+            return 0.0
+        day_dd = max(0.0, start_eq - self._equity)
+        return 100.0 * (day_dd + self.open_risk_dollars + per_contract_risk) / start_eq
+
     @property
     def must_flatten(self) -> bool:
         return self._breaker.state in (BreakerState.TRIPPED, BreakerState.LOCKED) and bool(

@@ -85,6 +85,13 @@ breaker = snap.get("breaker", "armed")
 breaker_icon = {"armed": "✅", "tripped": "⛔", "locked": "🔒"}.get(breaker, "❓")
 
 # --- status row -------------------------------------------------------
+proj = snap.get("projected_day_risk_pct")
+if proj is not None:
+    icon = "🟢" if proj <= 6.0 else "🔴"
+    st.caption(f"{icon} If the next worst-case trade is taken now, maximum day risk becomes "
+               f"**{proj:.1f}%** of starting equity (gate holds ≤ 6.0%) · sizing mode: "
+               f"**{snap.get('sizing_mode', '?')}**")
+
 c = st.columns(6)
 c[0].metric("Mode / State", f"{mode} · {snap.get('state', '?')}")
 c[1].metric(f"Breaker {breaker_icon}", breaker.upper(),
