@@ -1,0 +1,55 @@
+# GodMode0DTE v2 — high-conviction aggressive profile.
+# Run:  python -m godmode0dte_v2.app --config config/config.v2.yaml
+#
+# Philosophy: few trades, heavy size, long single-leg 0DTE options at the
+# extremes, sell into strength fast. One survival law: no trade can risk
+# more than the remaining daily-loss headroom (the breaker you kept must
+# stay real). Replace the conviction conditions below with YOUR exact
+# rules — every threshold is data-driven, no code edits needed.
+
+paper_mode: true            # prove the plumbing for a few sessions, then flip
+mode: present               # present = surface setup + suggested size, human fires
+                            # auto    = the system fires the entry itself
+timezone: America/New_York
+
+conviction:
+  min_conditions_pct: 100   # perfect means ALL conditions — lower only knowingly
+  cooldown_min: 20
+  long_put_conditions:      # fade the overbought blowoff
+    - {metric: rsi_2m,           op: ">=", value: 85}
+    - {metric: vwap_stretch_atr, op: ">=", value: 2.5}
+    - {metric: rel_volume,       op: ">=", value: 2.0}
+    - {metric: book_imbalance,   op: "<=", value: -0.20}
+  long_call_conditions:     # catch the oversold flush
+    - {metric: rsi_2m,           op: "<=", value: 15}
+    - {metric: vwap_stretch_atr, op: "<=", value: -2.5}
+    - {metric: rel_volume,       op: ">=", value: 2.0}
+    - {metric: book_imbalance,   op: ">=", value: 0.20}
+
+sizing:
+  conviction_risk_pct: 20   # heavy: ~10x v1. Hard ceiling 33. Must be <= daily limit.
+  daily_loss_limit_pct: 25  # THE survival rule: breach -> flatten + lock the day
+  max_trades_per_day: 2     # a third "perfect" setup in one day means the definition is wrong
+  min_equity: 1000
+
+exits:                      # in fast, out faster
+  scale_outs:               # [premium multiple, fraction of original size]
+    - [2.0, 0.50]
+    - [4.0, 0.25]
+  runner_trail_pct: 40      # trail the last piece 40% below its high-water mark
+  hard_stop_pct: 50
+  max_hold_min: 60
+  force_flat: "15:30:00"
+
+instrument:
+  underlying: SPY
+  target_delta: 0.40
+  max_leg_spread_pct_of_mid: 10
+  min_open_interest: 500
+
+shadow_all_signals: true    # every surfaced setup is paper-followed, taken or not
+
+data:
+  snapshot_path: state/v2_snapshot.json
+  trade_log_path: state/v2_trades.jsonl
+  decision_log_path: state/v2_decisions.jsonl

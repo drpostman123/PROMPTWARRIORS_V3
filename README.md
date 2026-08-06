@@ -159,3 +159,16 @@ The parameter set was produced by a five-persona agent debate (signal
 researcher, risk manager, execution engineer, quant statistician, systems
 architect) — see [`docs/DESIGN_SPEC.md`](docs/DESIGN_SPEC.md) for the full
 synthesized specification and the debate's resolved conflicts.
+
+## v2 — high-conviction aggressive style (parallel system)
+
+`godmode0dte_v2/` is a deliberate second system with the opposite
+philosophy: long single-leg 0DTE options at overbought/oversold extremes,
+heavy sizing (default 20% of equity per perfect setup, ceiling 33%), fast
+scale-outs into strength, no statistical promotion gates — one survival
+law (per-trade risk ≤ remaining daily-loss headroom; daily limit 25%
+flatten-and-lock) plus a 2-trades/day cap and the shadow book. `present`
+mode surfaces setups with suggested size for the human to fire; `auto`
+fires itself. See [`docs/V2_AGGRESSIVE.md`](docs/V2_AGGRESSIVE.md) —
+including the honest arithmetic of what 20% sizing means. The v1
+measurement system is unchanged and both can run side by side.
