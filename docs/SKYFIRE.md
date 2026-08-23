@@ -50,6 +50,7 @@ HELIUS_API_KEY=...            # required (public RPC is selftest-only)
 SKYFIRE_KEY_PASSPHRASE=...    # decrypts secrets/wallet.age
 BIRDEYE_API_KEY=...           # optional: holder-count enrichment
 JUPITER_API_KEY=...           # optional: api.jup.ag keyed tier
+SKYFIRE_DASH_TOKEN=...        # >=16 chars — gates the web dashboard
 ```
 
 Config: `config/skyfire.yaml`. Every number can only **tighten** the
@@ -139,6 +140,23 @@ recent conclusions; `freeze_policy` / `unfreeze_policy` (or
 learner keeps journaling what it *would* have done.
 
 ## Monitoring
+
+**Remote web dashboard** (`skyfire-dash`, `deploy/skyfire-dash.service`):
+token-authed Starlette app on 127.0.0.1:8787 showing NAV, badges
+(breaker/probation/soft-tier/kill), sleeves, positions, policy version +
+recent learner conclusions, phantom stats, and the decision journal —
+plus the operator buttons (KILL+flatten, go full size / back to
+probation, freeze / unfreeze policy). Set `SKYFIRE_DASH_TOKEN`
+(>=16 chars) in `/etc/skyfire/env`; the process refuses to start
+without it. Reach it from anywhere via a tunnel:
+
+```bash
+ngrok http 8787            # quick public tunnel (token still required)
+tailscale serve 8787       # preferred: private tailnet, nothing public
+```
+
+The dashboard and the MCP monitor are both out-of-process observers over
+the same state dir — they can watch and halt, never trade.
 
 - `state/skyfire/heartbeat.json` — 5s cadence; stale >30s means the
   runtime is dead (the MCP `status` tool flags this).

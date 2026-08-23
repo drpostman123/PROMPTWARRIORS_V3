@@ -1,0 +1,43 @@
+# SKYFIRE web dashboard — a SEPARATE process from the trading runtime.
+# Install: cp deploy/skyfire-dash.service /etc/systemd/system/
+#
+# Same confinement as the MCP monitor: read-only over the state dir plus
+# the three operator file-writes (KILL, FULL_SIZE, POLICY_FREEZE). No
+# wallet, no RPC — a compromised dashboard can observe and halt, only.
+#
+# Auth is MANDATORY: the process refuses to start without
+# SKYFIRE_DASH_TOKEN (>=16 chars) in the environment file. Bind stays on
+# 127.0.0.1 — expose it through a tunnel, never directly:
+#   ngrok http 8787                      # quick anywhere-access
+#   tailscale serve 8787                 # better: private tailnet, no
+#                                        #   public URL to guess
+# The token still gates every /api call even through the tunnel.
+
+[Unit]
+Description=SKYFIRE web dashboard (read + kill/full-size/freeze controls)
+After=network-online.target
+
+[Service]
+Type=simple
+User=skyfire
+Group=skyfire
+WorkingDirectory=/opt/skyfire
+EnvironmentFile=/etc/skyfire/env
+ExecStart=/opt/skyfire/venv/bin/skyfire-dash --state-dir /opt/skyfire/state/skyfire --host 127.0.0.1 --port 8787
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/skyfire/state/skyfire
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
