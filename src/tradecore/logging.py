@@ -1,7 +1,7 @@
 """Structured JSON logging via structlog.
 
 Every decision, transition, rejection, order, and fill is a structured
-event. Console gets pretty output; ``logs/godmode.jsonl`` gets JSON for
+event. Console gets pretty output; ``logs/<filename>`` gets JSON for
 post-hoc calibration.
 """
 
@@ -14,10 +14,15 @@ from pathlib import Path
 import structlog
 
 
-def setup_logging(log_dir: str = "logs", level: int = logging.INFO) -> structlog.BoundLogger:
+def setup_logging(
+    log_dir: str = "logs",
+    level: int = logging.INFO,
+    filename: str = "trade.jsonl",
+    root_logger_name: str = "tradecore",
+) -> structlog.BoundLogger:
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
-    file_handler = logging.FileHandler(Path(log_dir) / "godmode.jsonl")
+    file_handler = logging.FileHandler(Path(log_dir) / filename)
     file_handler.setFormatter(logging.Formatter("%(message)s"))
     console_handler = logging.StreamHandler(sys.stdout)
 
@@ -38,8 +43,8 @@ def setup_logging(log_dir: str = "logs", level: int = logging.INFO) -> structlog
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
-    return structlog.get_logger("godmode")
+    return structlog.get_logger(root_logger_name)
 
 
-def get_logger(name: str = "godmode") -> structlog.BoundLogger:
+def get_logger(name: str = "tradecore") -> structlog.BoundLogger:
     return structlog.get_logger(name)

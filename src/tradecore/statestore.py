@@ -1,5 +1,10 @@
-"""Snapshot store: the runtime writes JSON state; the Streamlit dashboard
-reads it. Decisions and trades append to JSONL logs for calibration."""
+"""Snapshot store: the runtime writes JSON state; dashboards read it.
+Decisions and trades append to JSONL logs for calibration.
+
+The snapshot write is tmp + rename (atomic on POSIX) so a reader never
+sees a torn file. JSONL appends reopen the file per record so logrotate
+can rename the log losslessly.
+"""
 
 from __future__ import annotations
 
@@ -9,16 +14,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from godmode0dte.config import DataConfig
 
-
-def _jsonable(obj: Any) -> Any:
+def jsonable(obj: Any) -> Any:
     if is_dataclass(obj) and not isinstance(obj, type):
-        return {k: _jsonable(v) for k, v in asdict(obj).items()}
+        return {k: jsonable(v) for k, v in asdict(obj).items()}
     if isinstance(obj, dict):
-        return {str(k): _jsonable(v) for k, v in obj.items()}
+        return {str(k): jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_jsonable(v) for v in obj]
+        return [jsonable(v) for v in obj]
     if isinstance(obj, datetime):
         return obj.isoformat()
     if hasattr(obj, "value"):  # Enum
@@ -27,17 +30,17 @@ def _jsonable(obj: Any) -> Any:
 
 
 class StateStore:
-    def __init__(self, cfg: DataConfig) -> None:
-        self._snapshot_path = Path(cfg.snapshot_path)
-        self._trade_log = Path(cfg.trade_log_path)
-        self._decision_log = Path(cfg.decision_log_path)
+    def __init__(self, snapshot_path: str, trade_log_path: str, decision_log_path: str) -> None:
+        self._snapshot_path = Path(snapshot_path)
+        self._trade_log = Path(trade_log_path)
+        self._decision_log = Path(decision_log_path)
         for p in (self._snapshot_path, self._trade_log, self._decision_log):
             p.parent.mkdir(parents=True, exist_ok=True)
 
     def write_snapshot(self, snapshot: dict) -> None:
         snapshot = dict(snapshot, ts=datetime.now(timezone.utc).isoformat())
         tmp = self._snapshot_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(_jsonable(snapshot), indent=2))
+        tmp.write_text(json.dumps(jsonable(snapshot), indent=2))
         tmp.replace(self._snapshot_path)          # atomic on POSIX
 
     def read_snapshot(self) -> dict:
@@ -63,4 +66,4 @@ class StateStore:
     def _append(path: Path, record: dict) -> None:
         record = dict(record, ts=datetime.now(timezone.utc).isoformat())
         with path.open("a") as f:
-            f.write(json.dumps(_jsonable(record)) + "\n")
+            f.write(json.dumps(jsonable(record)) + "\n")

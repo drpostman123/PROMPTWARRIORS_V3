@@ -40,6 +40,7 @@ from godmode0dte.risk.governor import ApprovedTrade, RiskGovernor
 from godmode0dte.scoring.engine import ScoreEngine, ScoringInputs
 from godmode0dte.state.machine import StateMachine, TradingState
 from godmode0dte.state.store import StateStore
+from tradecore.supervise import supervised
 
 log = get_logger("app")
 
@@ -191,15 +192,7 @@ class GodModeApp:
             raise
 
     async def _supervised(self, name: str, factory) -> None:
-        while not self._stop.is_set():
-            try:
-                await factory()
-                return
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:                  # noqa: BLE001 — log, restart the loop
-                log.error("task_crashed", task=name, error=str(e))
-                await asyncio.sleep(1.0)
+        await supervised(name, factory, self._stop, log)
 
     def stop(self) -> None:
         self._stop.set()
