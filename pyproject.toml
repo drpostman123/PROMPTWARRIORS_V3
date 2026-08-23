@@ -20,6 +20,7 @@ dependencies = [
     "rich>=13.7",
     "pyrage>=1.1",
     "base58>=2.1",
+    "hyperliquid-python-sdk>=0.24",
 ]
 
 [project.optional-dependencies]

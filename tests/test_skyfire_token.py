@@ -19,6 +19,7 @@ import pytest
 import skyfire_sol
 from skyfire_sol.config import USDC_MINT
 from skyfire_sol.models import (
+    HlIntent,
     IntentKind,
     JupQuote,
     PerpIntent,
@@ -27,7 +28,7 @@ from skyfire_sol.models import (
     TradeIntent,
     Urgency,
 )
-from skyfire_sol.safety.gate import ApprovedOrder, ApprovedPerpOrder
+from skyfire_sol.safety.gate import ApprovedHlOrder, ApprovedOrder, ApprovedPerpOrder
 
 NOW = datetime.now(timezone.utc)
 PKG_ROOT = Path(skyfire_sol.__file__).parent
@@ -59,6 +60,16 @@ def test_approved_perp_order_forgery_raises():
                           approved_ts=NOW)
 
 
+def test_approved_hl_order_forgery_raises():
+    hi = HlIntent("h1", "PUMP", "open", 100.0, 0.0, 0.005, "t", NOW)
+    with pytest.raises(PermissionError):
+        ApprovedHlOrder(intent=hi, notional_usd=100.0, gate_trace="[]",
+                        approved_ts=NOW)
+    with pytest.raises(PermissionError):
+        ApprovedHlOrder(intent=hi, notional_usd=100.0, gate_trace="[]",
+                        approved_ts=NOW, _token=object())
+
+
 def test_gate_minted_order_constructs(tmp_path):
     # the only legitimate mint site works (via the module-private token)
     from skyfire_sol.safety import gate as gate_mod
@@ -75,6 +86,8 @@ async def test_executor_rejects_non_approved():
         await ex.execute(_intent())                  # a bare intent is not approval
     with pytest.raises(PermissionError):
         await ex.execute_perp(_intent())
+    with pytest.raises(PermissionError):
+        await ex.execute_hl(_intent())
 
 
 FORBIDDEN_FOR_CEO = ("skyfire_sol.safety", "skyfire_sol.execution",
@@ -124,6 +137,19 @@ def test_send_and_confirm_called_only_by_executor():
         if ".send_and_confirm(" in text or ".send_raw(" in text:
             offenders.append(str(py))
     assert not offenders, f"raw submit outside execution/: {offenders}"
+
+
+def test_hl_orders_placed_only_by_execution_layer():
+    """market_open/market_close (the HL submit calls) live only under
+    execution/ — sleeves read via the venue but cannot place orders."""
+    offenders = []
+    for py in PKG_ROOT.rglob("*.py"):
+        if py.parent.name == "execution":
+            continue
+        text = py.read_text()
+        if ".market_open" in text or ".market_close(" in text:
+            offenders.append(str(py))
+    assert not offenders, f"HL order calls outside execution/: {offenders}"
 
 
 def test_gate_trace_is_json():

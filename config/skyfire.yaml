@@ -9,7 +9,9 @@
 #   JUPITER_API_KEY         (optional, for api.jup.ag keyed tier)
 
 wallet:
-  age_key_path: secrets/wallet.age
+  age_key_path: secrets/wallet.age        # Solana (Phantom-funded)
+  hl_age_key_path: secrets/wallet_hl.age  # Hyperliquid EVM key
+                                          # (scripts/skyfire_keygen.py --evm)
 
 rpc:
   url: "https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}"
@@ -40,11 +42,13 @@ discovery:
 
 sleeves:
   # Boot state ONLY — the CEO owns allocation at runtime (inside gate clamps).
+  # MEME + PERPS + HL_ROTATION = 55 = the risk-on correlation-bucket cap.
   boot_allocations:
-    MEME_ROTATION: 40
+    MEME_ROTATION: 25
     CORE_HOLD: 25
     YIELD: 20
-    PERPS: 15
+    PERPS: 10
+    HL_ROTATION: 20
   meme:
     max_positions: 5
     max_position_pct_of_sleeve: 20   # = 8% of portfolio at 40% sleeve
@@ -72,17 +76,31 @@ sleeves:
     max_leverage: 3.0
     max_funding_pct_hr: 0.05
     subaccount_id: 1
+  hl:
+    enabled: true                    # inert until secrets/wallet_hl.age exists
+    base_url: "https://api.hyperliquid.xyz"
+    top_n: 3                         # hold the top-3 momentum names
+    min_day_volume_usd: 20000000     # $20M/day floor — the liquid meme tail
+    exclude: [BTC, ETH, SOL, HYPE]   # majors are CORE's job
+    max_leverage: 1.0                # rotation runs unlevered (ceiling 3)
+    max_funding_pct_hr: 0.05         # never pay rich funding to hold a crowd
+    slippage_cap_pct: 1.0            # IOC bound on HL market orders
+    trail_from_peak_pct: 40
+    min_order_usd: 15
+    loop_seconds: 300
 
 risk:
-  hwm_breaker_pct: 60        # -60% from high-water mark -> flatten to USDC, halt
-  soft_tier_pct: 30          # -30%: MEME+PERPS halve, no new entries...
-  soft_tier_clear_pct: 20    # ...until back above -20%
-  daily_pause_pct: 10        # -10% in a day -> 24h entry pause (positions held)
+  # Generous ladder by operator choice — ceilings in code: soft<=45, daily<=20.
+  hwm_breaker_pct: 60        # -60% from high-water mark -> flatten, halt (unchanged)
+  soft_tier_pct: 40          # -40%: MEME+PERPS+HL halve, no new entries...
+  soft_tier_clear_pct: 30    # ...until back above -30%
+  daily_pause_pct: 15        # -15% in a day -> 24h entry pause (positions held)
   daily_pause_hours: 24
-  corr_risk_on_pct: 55       # MEME+PERPS are ONE risk bucket
+  corr_risk_on_pct: 55       # MEME+PERPS+HL are ONE risk bucket
   corr_risk_off_pct: 30
-  probation_size_frac: 0.5   # first-session throttle
-  probation_clean_fills: 10  # auto-lift after 10 fills within tolerance
+  probation_size_frac: 0.5   # throttle until YOU push the button:
+  probation_clean_fills: 10  #   MCP go_full_size (or touch state/skyfire/FULL_SIZE).
+                             #   clean_fills is a readiness display, NOT a trigger.
   clean_fill_slippage_pct: 1.0
   nav_stale_entries_off_s: 60
   nav_quarantine_jump_pct: 20

@@ -48,6 +48,16 @@ TOOLS = [
                     "The KILL file persists until an operator deletes it.",
      "inputSchema": {"type": "object", "properties": {
          "reason": {"type": "string"}}, "required": ["reason"]}},
+    {"name": "go_full_size",
+     "description": "THE MANUAL PROBATION BUTTON: lift the reduced-size "
+                    "probation throttle to full size. Human-only decision — "
+                    "there is no automatic lift. Check status.clean_fills "
+                    "readiness first.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "back_to_probation",
+     "description": "Re-engage the probation size throttle (deletes the "
+                    "FULL_SIZE button file).",
+     "inputSchema": {"type": "object", "properties": {}}},
 ]
 
 
@@ -124,6 +134,19 @@ class Monitor:
             f"{reason} (via MCP, {datetime.now(timezone.utc).isoformat()})\n")
         return {"engaged": True, "reason": reason,
                 "note": "delete state/skyfire/KILL to re-enable trading"}
+
+    def go_full_size(self) -> dict:
+        (self.dir / "FULL_SIZE").write_text(
+            f"lifted via MCP {datetime.now(timezone.utc).isoformat()}\n")
+        return {"probation": False,
+                "note": "full size engaged; back_to_probation reverses this"}
+
+    def back_to_probation(self) -> dict:
+        try:
+            (self.dir / "FULL_SIZE").unlink()
+        except FileNotFoundError:
+            pass
+        return {"probation": True}
 
 
 def handle(monitor: Monitor, req: dict) -> dict | None:

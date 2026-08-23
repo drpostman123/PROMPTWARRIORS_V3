@@ -51,6 +51,7 @@ class ExecutionAgent:
         publish: Callable[[str, object], Awaitable[None]],   # bus.publish
         log_trade: Callable[[dict], Awaitable[None]],
         drift=None,                                   # execution.drift_venue.DriftVenue
+        hl=None,                                      # execution.hl_venue.HlVenue
     ) -> None:
         self._cfg = cfg
         self._wallet = wallet
@@ -60,6 +61,33 @@ class ExecutionAgent:
         self._publish = publish
         self._log_trade = log_trade
         self._drift = drift
+        self._hl = hl
+
+    async def execute_hl(self, approved) -> bool:
+        from skyfire_sol.safety.gate import ApprovedHlOrder
+        if not isinstance(approved, ApprovedHlOrder):
+            raise PermissionError("executor accepts ApprovedHlOrder only")
+        if self._hl is None or not self._hl.connected:
+            log.error("hl_order_no_venue", intent_id=approved.intent.intent_id)
+            return False
+        intent = approved.intent
+        slippage = self._cfg.sleeves.hl.slippage_cap_pct
+        if intent.action == "open":
+            result = await self._hl.market_open_long(
+                intent.coin, approved.notional_usd, intent.mark_px, slippage)
+        else:
+            result = await self._hl.market_close(intent.coin, slippage)
+        ok = result is not None
+        await self._log_trade({
+            "kind": "hl_order", "intent_id": intent.intent_id,
+            "coin": intent.coin, "action": intent.action,
+            "notional_usd": approved.notional_usd, "ok": ok,
+            "reason": intent.reason})
+        if ok:
+            await self._publish("hl_fills", {
+                "intent_id": intent.intent_id, "coin": intent.coin,
+                "action": intent.action, "notional_usd": approved.notional_usd})
+        return ok
 
     async def execute_perp(self, approved) -> Optional[str]:
         from skyfire_sol.safety.gate import ApprovedPerpOrder

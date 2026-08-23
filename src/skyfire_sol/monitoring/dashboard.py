@@ -32,7 +32,8 @@ def render(bb: Blackboard) -> Group:
     if snap.safety.kill:
         badges.append("KILL")
     if snap.safety.probation:
-        badges.append(f"PROBATION {snap.safety.clean_fills}/10")
+        badges.append(f"PROBATION {snap.safety.clean_fills} clean "
+                      "(manual lift: MCP go_full_size)")
     if snap.safety.soft_tier_active:
         badges.append("SOFT-TIER")
     if snap.safety.daily_pause_until:

@@ -60,6 +60,9 @@ class FakeExecutor:
     async def execute_perp(self, approved):
         self.orders.append(approved)
 
+    async def execute_hl(self, approved):
+        self.orders.append(approved)
+
 
 def snapshot(nav=10_000.0, meme_nav=0.0, positions=(), regime=RegimeState.RISK_ON,
              targets=None, ts=None) -> Snapshot:
@@ -211,15 +214,18 @@ async def test_s8_position_cap_resizes_down_never_up(h):
     assert r.size_usd == pytest.approx(800.0 * h.probation.size_mult)
 
 
-async def test_s9_probation_halves_size(h):
+async def test_s9_probation_halves_size_until_button(h, tmp_path):
     assert h.probation.active
     r = await h.gate.process(h.intent(size=100.0))
     assert isinstance(r, ApprovedOrder)
     assert r.size_usd == pytest.approx(50.0)
-    for _ in range(10):
-        h.probation.record_fill(0.1)
+    for _ in range(20):
+        h.probation.record_fill(0.1)                # clean fills never auto-lift
     r2 = await h.gate.process(h.intent(size=100.0))
-    assert r2.size_usd == pytest.approx(100.0)
+    assert r2.size_usd == pytest.approx(50.0)
+    (tmp_path / "FULL_SIZE").write_text("go")       # the manual button
+    r3 = await h.gate.process(h.intent(size=100.0))
+    assert r3.size_usd == pytest.approx(100.0)
 
 
 async def test_s10_slippage_cap_rejects(h):

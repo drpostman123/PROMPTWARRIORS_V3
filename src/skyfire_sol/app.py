@@ -113,9 +113,26 @@ class SkyfireApp:
         self.scanner = Scanner(cfg, self.dex, self.rug, self.birdeye, self.jup,
                                self.rpc, self.phantom, self.blacklist,
                                self.bus.publish)
+        # Hyperliquid: EVM wallet + venue, only if the key file exists.
+        self.hl_venue = None
+        self.hl = None
+        if cfg.sleeves.hl.enabled:
+            from pathlib import Path
+            if Path(cfg.wallet.hl_age_key_path).exists():
+                from skyfire_sol.execution.hl_venue import HlVenue
+                from skyfire_sol.wallet_evm import EvmWallet
+                hlw = EvmWallet.load(cfg.wallet.hl_age_key_path,
+                                     creds.key_passphrase)
+                self.hl_venue = HlVenue(cfg.sleeves.hl.base_url,
+                                        hlw.account, hlw.address)
+            else:
+                log.warning("hl_disabled_no_key",
+                            path=cfg.wallet.hl_age_key_path,
+                            detail="run scripts/skyfire_keygen.py --evm to enable")
+
         self.executor = ExecutionAgent(cfg, self.wallet, self.rpc, self.jup,
                                        self.probation, self.bus.publish,
-                                       self._log_trade)
+                                       self._log_trade, hl=self.hl_venue)
         self.gate = SafetyGate(cfg, self.breaker, self.probation, self.kill,
                                self.bb, self.jup, self.executor,
                                self.scanner.rug_verdict_for,
@@ -127,6 +144,10 @@ class SkyfireApp:
                                   self.scanner.decimals_for)
         self.core = CoreAgent(cfg, self.bb, self.bus.publish)
         self.yield_ = YieldAgent(cfg, self.bb, self.bus.publish)
+        if self.hl_venue is not None:
+            from skyfire_sol.sleeves.hl_rotation import HlRotationAgent
+            self.hl = HlRotationAgent(cfg, self.bb, self.bus.publish,
+                                      self.hl_venue, self.breaker, self.phantom)
         self.backfill = BackfillJob(self.db, self.price_usd)
 
     # -- shared helpers ---------------------------------------------------
@@ -161,7 +182,14 @@ class SkyfireApp:
     async def start(self) -> None:
         await self.db.open()
         persist_q = self.bus.subscribe("persist")
+        if self.hl_venue is not None:
+            try:
+                await self.hl_venue.connect()
+            except Exception as e:                  # noqa: BLE001 — HL is optional
+                log.error("hl_connect_failed", error=str(e))
+                self.hl = None
         log.info("skyfire_boot", wallet=str(self.wallet.pubkey),
+                 hl_wallet=(self.hl_venue._address if self.hl_venue else None),
                  probation=self.probation.active,
                  breaker=self.breaker.state.value)
 
@@ -181,19 +209,31 @@ class SkyfireApp:
             ("snapshot", self._snapshot_task),
             ("backfill", self.backfill.run),
         ]
+        if self.hl is not None:
+            tasks.append(("hl", self.hl.run))
+            tasks.append(("hl_intents", self._hl_intent_pipeline))
         try:
             await asyncio.gather(*(
                 supervised(name, fn, self._stop, log) for name, fn in tasks))
         except BaseException:
-            open_positions = list(self.meme.book.values())
-            if open_positions:
+            if self.meme.book or self.hl is not None:
                 try:
-                    self.breaker.trip("fatal runtime crash with open positions")
+                    if self.meme.book:
+                        self.breaker.trip("fatal runtime crash with open positions")
                 except Exception as e:              # noqa: BLE001 — never skip flatten
                     log.error("crash_trip_failed", error=str(e))
                 try:
+                    # Subscribe BEFORE flattening so the drain sees the exits
+                    # (a fresh subscription misses earlier publishes).
+                    q = self.bus.subscribe("intents")
+                    hq = self.bus.subscribe("hl_intents")
                     await self.meme.flatten_all("fatal_crash")
-                    await self._drain_intents_once()
+                    if self.hl is not None:
+                        await self.hl.flatten_all("fatal_crash")
+                    while not q.empty():
+                        await self.gate.process(q.get_nowait(), None)
+                    while not hq.empty():
+                        await self.gate.process_hl(hq.get_nowait())
                 except Exception as e:              # noqa: BLE001 — best effort
                     log.error("crash_flatten_failed", error=str(e))
             raise
@@ -216,12 +256,11 @@ class SkyfireApp:
                 verdict = self.ceo.judge_intent(intent, self.bb.snapshot())
             await self.gate.process(intent, verdict)
 
-    async def _drain_intents_once(self) -> None:
-        """Crash path: push any queued flatten exits through the gate."""
-        q = self.bus.subscribe("intents")
-        await asyncio.sleep(0)                       # let publishers enqueue
-        while not q.empty():
-            await self.gate.process(q.get_nowait(), None)
+    async def _hl_intent_pipeline(self) -> None:
+        q = self.bus.subscribe("hl_intents")
+        while True:
+            intent = await q.get()
+            await self.gate.process_hl(intent)
 
     async def _signals_pipeline(self) -> None:
         q = self.bus.subscribe("meme_signals")
@@ -280,6 +319,11 @@ class SkyfireApp:
             if px:
                 nav += raw / 10 ** decimals * px
 
+        hl_nav = 0.0
+        if self.hl_venue is not None and self.hl_venue.connected:
+            hl_nav = await self.hl_venue.equity_usd()
+            nav += hl_nav
+
         sane = self.breaker.accept_nav(nav)
         if sane is None:
             return                                   # quarantined reading
@@ -290,11 +334,12 @@ class SkyfireApp:
         meme_nav = sum(self.meme._pos_value(p) for p in self.meme.book.values())
         yield_nav = balances.get(JITOSOL_MINT, 0) / 1e9 * prices.get(JITOSOL_MINT, 0.0)
         perps_nav = 0.0                              # margin lives on Drift (Phase 4)
-        core_nav = max(0.0, sane - meme_nav - yield_nav - perps_nav)
+        core_nav = max(0.0, sane - meme_nav - yield_nav - perps_nav - hl_nav)
         sleeve_navs = {SleeveId.MEME_ROTATION.value: meme_nav,
                        SleeveId.CORE_HOLD.value: core_nav,
                        SleeveId.YIELD.value: yield_nav,
-                       SleeveId.PERPS.value: perps_nav}
+                       SleeveId.PERPS.value: perps_nav,
+                       SleeveId.HL_ROTATION.value: hl_nav}
         current = {k: (v / sane * 100.0 if sane > 0 else 0.0)
                    for k, v in sleeve_navs.items()}
 
@@ -382,8 +427,14 @@ class SkyfireApp:
                 reason = "kill_switch" if self.kill.engaged else "breaker_flatten"
                 log.error("flatten_all", reason=reason)
                 await self.meme.flatten_all("breaker_flatten")
+                if self.hl is not None:
+                    await self.hl.flatten_all("breaker_flatten")
             if tripped and not self.meme.book:
-                self.breaker.confirm_flat()
+                hl_flat = True
+                if self.hl_venue is not None and self.hl_venue.connected:
+                    hl_flat = not await self.hl_venue.positions()
+                if hl_flat:
+                    self.breaker.confirm_flat()
             if not self.kill.engaged and self.breaker.state is BreakerState.ARMED:
                 self._flatten_fired = False
 

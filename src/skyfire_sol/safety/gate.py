@@ -49,6 +49,7 @@ from skyfire_sol.clients.jupiter import (
 from skyfire_sol.config import MAJOR_MINTS, USDC_MINT, AppConfig
 from skyfire_sol.models import (
     CeoVerdict,
+    HlIntent,
     IntentKind,
     JupQuote,
     PerpIntent,
@@ -87,6 +88,22 @@ class ApprovedOrder:
             raise PermissionError(
                 "ApprovedOrder may only be created by the SafetyGate. "
                 "Sleeves and the CEO submit TradeIntents instead.")
+
+
+@dataclass(frozen=True)
+class ApprovedHlOrder:
+    """Proof of safety approval for a Hyperliquid order. Same token."""
+
+    intent: HlIntent
+    notional_usd: float           # final, post-clamp
+    gate_trace: str
+    approved_ts: datetime
+    _token: object = None
+
+    def __post_init__(self) -> None:
+        if self._token is not _GATE_TOKEN:
+            raise PermissionError(
+                "ApprovedHlOrder may only be created by the SafetyGate.")
 
 
 @dataclass(frozen=True)
@@ -143,26 +160,30 @@ class SafetyGate:
         The CEO may propose anything; what comes out obeys the correlation
         bucket, the soft tier, and non-negativity, renormalized to 100."""
         t = {k: max(0.0, float(v)) for k, v in targets.items()}
-        for k in (SleeveId.MEME_ROTATION, SleeveId.CORE_HOLD, SleeveId.YIELD, SleeveId.PERPS):
+        for k in SleeveId:
             t.setdefault(k.value, 0.0)
         if not self._cfg.sleeves.perps.enabled:
             t[SleeveId.PERPS.value] = 0.0
+        if not self._cfg.sleeves.hl.enabled:
+            t[SleeveId.HL_ROTATION.value] = 0.0
         total = sum(t.values()) or 1.0
         t = {k: v / total * 100.0 for k, v in t.items()}
 
         bucket_cap = (self._cfg.risk.corr_risk_on_pct
                       if regime is RegimeState.RISK_ON
                       else self._cfg.risk.corr_risk_off_pct)
+        bucket_ids = (SleeveId.MEME_ROTATION.value, SleeveId.PERPS.value,
+                      SleeveId.HL_ROTATION.value)
         if self._breaker.soft_tier_active:
-            t[SleeveId.MEME_ROTATION.value] *= 0.5
-            t[SleeveId.PERPS.value] *= 0.5
+            for k in bucket_ids:
+                t[k] *= 0.5
             bucket_cap = min(bucket_cap, self._cfg.risk.corr_risk_off_pct)
 
-        bucket = t[SleeveId.MEME_ROTATION.value] + t[SleeveId.PERPS.value]
+        bucket = sum(t[k] for k in bucket_ids)
         if bucket > bucket_cap and bucket > 0:
             scale = bucket_cap / bucket
-            t[SleeveId.MEME_ROTATION.value] *= scale
-            t[SleeveId.PERPS.value] *= scale
+            for k in bucket_ids:
+                t[k] *= scale
         # Freed weight retreats into CORE (the USDC buffer lives there).
         total = sum(t.values())
         if total < 100.0:
@@ -272,16 +293,17 @@ class SafetyGate:
             ok("S6_rug", "n/a")
 
         if is_entry:
-            # S7 correlation bucket: MEME NAV + PERPS exposure + this entry
+            # S7 correlation bucket: MEME + PERPS + HL exposure + this entry
             meme_nav = snap.sleeve_navs.get(SleeveId.MEME_ROTATION.value, 0.0)
             perps_nav = snap.sleeve_navs.get(SleeveId.PERPS.value, 0.0)
+            hl_nav = snap.sleeve_navs.get(SleeveId.HL_ROTATION.value, 0.0)
             adds = size_usd if intent.sleeve in (SleeveId.MEME_ROTATION, SleeveId.PERPS) \
                 and intent.mint not in MAJOR_MINTS else 0.0
             cap_pct = (self._cfg.risk.corr_risk_on_pct
                        if snap.regime.state is RegimeState.RISK_ON
                        else self._cfg.risk.corr_risk_off_pct)
             if snap.nav_usd > 0 and adds > 0:
-                bucket_after = (meme_nav + perps_nav + adds) / snap.nav_usd * 100.0
+                bucket_after = (meme_nav + perps_nav + hl_nav + adds) / snap.nav_usd * 100.0
                 if bucket_after > cap_pct:
                     return rej("S7_correlation_bucket",
                                f"MEME+PERPS would be {bucket_after:.1f}% > {cap_pct}%")
@@ -348,6 +370,84 @@ class SafetyGate:
             intent=intent, quote=quote, size_usd=size_usd, amount_raw=amount_raw,
             gate_trace=json.dumps(trace), approved_ts=now, _token=_GATE_TOKEN)
 
+    async def process_hl(self, intent: HlIntent) -> Union[ApprovedHlOrder, Rejection]:
+        """Hyperliquid pipeline. Closes are risk-reducing and pass the
+        pause/soft tiers (and a TRIPPED breaker) like exits do; opens run
+        the full ladder plus the correlation bucket, per-position cap,
+        leverage cap, and probation resize."""
+        now = datetime.now(timezone.utc)
+        trace: list[dict] = []
+        snap = self._bb.snapshot()
+        reduces = intent.action == "close"
+
+        def rej(check: str, detail: str) -> Rejection:
+            trace.append({"check": check, "passed": False, "detail": detail})
+            return Rejection(intent.intent_id, check, detail, now)
+
+        def ok(check: str, detail: str = "") -> None:
+            trace.append({"check": check, "passed": True, "detail": detail})
+
+        if self._kill.engaged and not reduces:
+            return rej("S0_kill", self._kill.reason())
+        ok("S0_kill")
+        if self._breaker.state is BreakerState.LOCKED:
+            return rej("S1_breaker", "locked")
+        if self._breaker.state is BreakerState.TRIPPED and not reduces:
+            return rej("S1_breaker", "tripped — only closes pass")
+        ok("S1_breaker")
+        if not reduces:
+            if self._breaker.pause_until and now < self._breaker.pause_until:
+                return rej("S2_daily_pause", "paused")
+            if self._breaker.soft_tier_active:
+                return rej("S3_soft_tier", "no risk adds in soft tier")
+        ok("S2_daily_pause")
+        ok("S3_soft_tier")
+        if not reduces and (snap.nav_usd <= 0
+                            or self._bb.nav_age_s(now) > self._cfg.risk.nav_stale_entries_off_s):
+            return rej("S4_nav", "nav stale or zero")
+        ok("S4_nav")
+
+        notional = intent.notional_usd
+        if not reduces:
+            hl_cfg = self._cfg.sleeves.hl
+            # Correlation bucket: MEME + PERPS + HL after this open <= cap.
+            meme_nav = snap.sleeve_navs.get(SleeveId.MEME_ROTATION.value, 0.0)
+            perps_nav = snap.sleeve_navs.get(SleeveId.PERPS.value, 0.0)
+            hl_nav = snap.sleeve_navs.get(SleeveId.HL_ROTATION.value, 0.0)
+            cap_pct = (self._cfg.risk.corr_risk_on_pct
+                       if snap.regime.state is RegimeState.RISK_ON
+                       else self._cfg.risk.corr_risk_off_pct)
+            if snap.nav_usd > 0:
+                room = snap.nav_usd * cap_pct / 100.0 - meme_nav - perps_nav - hl_nav
+                notional = min(notional, max(0.0, room))     # resize down, never up
+            # Per-position cap: equal-weight slice of the sleeve target, levered.
+            sleeve_target = snap.nav_usd * snap.allocations_target.get(
+                SleeveId.HL_ROTATION.value, 0.0) / 100.0
+            per_pos = sleeve_target * hl_cfg.max_leverage / hl_cfg.top_n
+            notional = min(notional, per_pos)
+            ok("S7_correlation_bucket", f"notional ${notional:,.0f}")
+            # Probation resize (down, never up).
+            notional *= self._probation.size_mult
+            ok("S9_probation", f"mult {self._probation.size_mult}")
+            if notional < hl_cfg.min_order_usd:
+                return rej("S8_sleeve_caps",
+                           f"post-clamp notional ${notional:,.2f} below HL minimum")
+            ok("S8_sleeve_caps")
+        else:
+            ok("S7_correlation_bucket", "close")
+            ok("S9_probation", "close")
+            ok("S8_sleeve_caps", "close")
+
+        await self._log_decision({
+            "kind": "gate_approve_hl", "intent_id": intent.intent_id,
+            "coin": intent.coin, "action": intent.action,
+            "notional_usd": notional, "trace": trace})
+        approved = ApprovedHlOrder(intent=intent, notional_usd=notional,
+                                   gate_trace=json.dumps(trace),
+                                   approved_ts=now, _token=_GATE_TOKEN)
+        await self._executor.execute_hl(approved)
+        return approved
+
     async def process_perp(self, intent: PerpIntent) -> Union[ApprovedPerpOrder, Rejection]:
         """Perps pipeline: S0/S1/S2/S3/S4 + correlation bucket + leverage cap.
         Risk-reducing deltas (shrinking |notional|) pass the pause/soft tiers
@@ -387,12 +487,13 @@ class SafetyGate:
 
         delta = intent.delta_usd
         if not reduces and snap.nav_usd > 0:
-            # Correlation bucket: MEME NAV + |perp notional after| <= cap.
+            # Correlation bucket: MEME + HL NAV + |perp notional after| <= cap.
             meme_nav = snap.sleeve_navs.get(SleeveId.MEME_ROTATION.value, 0.0)
+            hl_nav = snap.sleeve_navs.get(SleeveId.HL_ROTATION.value, 0.0)
             cap_pct = (self._cfg.risk.corr_risk_on_pct
                        if snap.regime.state is RegimeState.RISK_ON
                        else self._cfg.risk.corr_risk_off_pct)
-            bucket_room = snap.nav_usd * cap_pct / 100.0 - meme_nav
+            bucket_room = snap.nav_usd * cap_pct / 100.0 - meme_nav - hl_nav
             # Leverage cap against the perps sleeve's target NAV (its margin).
             sleeve_nav = snap.nav_usd * snap.allocations_target.get(
                 SleeveId.PERPS.value, 0.0) / 100.0

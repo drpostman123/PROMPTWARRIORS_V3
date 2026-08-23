@@ -62,21 +62,27 @@ def test_unreadable_hwm_fails_locked(tmp_path):
 
 
 def test_soft_tier_hysteresis(tmp_path):
+    # generous defaults: tier at -40%, clears at -30%
     b = breaker(tmp_path)
     feed(b, 1000.0)
-    for nav in (850, 720, 690):
+    for nav in (850, 720, 690, 640, 590):
         b.on_nav(float(nav), T0)
-    assert b.soft_tier_active                       # -31%
-    b.on_nav(810.0, T0)                             # -19%: clears at -20
+    assert b.soft_tier_active                       # -41%
+    b.on_nav(650.0, T0)                             # -35%: still latched
+    assert b.soft_tier_active
+    b.on_nav(710.0, T0)                             # -29%: clears at -30
     assert not b.soft_tier_active
     b2 = breaker(tmp_path)                          # persisted either way
     assert not b2.soft_tier_active
 
 
 def test_daily_pause_and_no_reanchor(tmp_path):
+    # generous default: daily pause at -15%
     b = breaker(tmp_path)
     feed(b, 1000.0, T0)
-    b.on_nav(880.0, T0 + timedelta(hours=1))        # -12% intraday
+    b.on_nav(880.0, T0 + timedelta(hours=1))        # -12%: no pause yet
+    assert b.pause_until is None
+    b.on_nav(840.0, T0 + timedelta(hours=1))        # -16% intraday
     assert b.pause_until is not None
     ok, why = b.entries_allowed(T0 + timedelta(hours=2))
     assert not ok and why == "daily_pause"
@@ -101,16 +107,24 @@ def test_nav_quarantine_needs_3_confirmations(tmp_path):
     assert b.accept_nav(0.0) is None                # non-positive never sane
 
 
-def test_probation_lift_and_failsafe(tmp_path):
+def test_probation_is_manual_button_only(tmp_path):
     p = Probation(CFG, str(tmp_path))
     assert p.active and p.size_mult == 0.5
-    for _ in range(9):
-        p.record_fill(0.2)
-    assert p.active and p.clean_fills == 9
-    p.record_fill(5.0)                              # dirty: no increment
-    assert p.clean_fills == 9
-    p.record_fill(0.1)                              # 10th clean: lift
+    for _ in range(25):
+        p.record_fill(0.2)                          # clean fills NEVER auto-lift
+    assert p.active and p.size_mult == 0.5
+    assert p.clean_fills == 25 and p.ready          # readiness signal only
+    p.record_fill(5.0)                              # dirty: logged, not counted
+    assert p.clean_fills == 25
+    # the operator pushes the button
+    (tmp_path / "FULL_SIZE").write_text("go")
     assert not p.active and p.size_mult == 1.0
-    assert not Probation(CFG, str(tmp_path)).active  # persisted
+    assert not Probation(CFG, str(tmp_path)).active  # button survives restart
+    # deleting the button re-engages probation instantly
+    (tmp_path / "FULL_SIZE").unlink()
+    assert p.active and p.size_mult == 0.5
+    # counter persistence survives restart; unreadable counter still safe
+    assert Probation(CFG, str(tmp_path)).clean_fills == 25
     (tmp_path / "probation.json").write_text("{bad")
-    assert Probation(CFG, str(tmp_path)).active     # unreadable -> small
+    p3 = Probation(CFG, str(tmp_path))
+    assert p3.active and p3.clean_fills == 0

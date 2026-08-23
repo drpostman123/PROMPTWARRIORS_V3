@@ -18,6 +18,7 @@ class SleeveId(str, Enum):
     CORE_HOLD = "CORE_HOLD"
     YIELD = "YIELD"
     PERPS = "PERPS"
+    HL_ROTATION = "HL_ROTATION"
 
 
 class Side(str, Enum):
@@ -115,6 +116,34 @@ class TradeIntent:
     ts: datetime
     position_id: Optional[str] = None    # exits reference the position
     qty_raw: Optional[int] = None        # exits: exact raw units to sell
+
+
+@dataclass(frozen=True)
+class HlIntent:
+    """HL_ROTATION sleeve wish: open or close one Hyperliquid perp
+    position. Pure data, like TradeIntent."""
+
+    intent_id: str
+    coin: str                 # HL market name, e.g. "PUMP"
+    action: str               # "open" (long) | "close"
+    notional_usd: float       # target notional for opens; informational on close
+    current_notional_usd: float
+    mark_px: float            # mark at intent time (sizing; venue re-bounds slippage)
+    reason: str
+    ts: datetime
+
+
+@dataclass(frozen=True)
+class HlMarketStat:
+    """One Hyperliquid perp market's rotation-relevant stats."""
+
+    coin: str
+    mark_px: float
+    day_volume_usd: float
+    ret_24h_pct: float
+    funding_pct_hr: float
+    open_interest_usd: float
+    max_leverage: int
 
 
 @dataclass(frozen=True)

@@ -114,6 +114,15 @@ async def selftest(cfg: AppConfig) -> int:
         check("rugcheck report", report is not None,
               f"score {report.get('score_normalised') if report else '-'}")
 
+        if cfg.sleeves.hl.enabled:
+            try:
+                resp = await http.post(f"{cfg.sleeves.hl.base_url}/info",
+                                       json={"type": "metaAndAssetCtxs"})
+                n = len(resp.json()[0]["universe"]) if resp.status_code == 200 else 0
+                check("hyperliquid info", n > 0, f"{n} perp markets")
+            except Exception as e:                   # noqa: BLE001
+                check("hyperliquid info", False, str(e))
+
     db = Database(cfg.data.db_path)
     try:
         await db.open()

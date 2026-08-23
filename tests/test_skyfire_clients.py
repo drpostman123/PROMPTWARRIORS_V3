@@ -15,6 +15,7 @@ from skyfire_sol.clients.jupiter import JupiterClient, SlippageCapExceeded
 from skyfire_sol.clients.rugcheck import RugCheckClient
 from skyfire_sol.config import (
     CoreConfig,
+    HlConfig,
     MemeConfig,
     PerpsConfig,
     RiskConfig,
@@ -112,23 +113,42 @@ def test_config_ceilings_reject_loosening():
     with pytest.raises(ValidationError):
         RiskConfig(hwm_breaker_pct=70.0)
     with pytest.raises(ValidationError):
-        RiskConfig(daily_pause_pct=15.0)
+        RiskConfig(daily_pause_pct=25.0)             # ceiling is 20
+    with pytest.raises(ValidationError):
+        RiskConfig(soft_tier_pct=50.0)               # ceiling is 45
     with pytest.raises(ValidationError):
         RiskConfig(corr_risk_on_pct=60.0)
     with pytest.raises(ValidationError):
         RiskConfig(probation_size_frac=0.8)
     with pytest.raises(ValidationError):
         PerpsConfig(max_leverage=4.0)
-    # tightening is welcome
-    assert RiskConfig(hwm_breaker_pct=40.0).hwm_breaker_pct == 40.0
+    with pytest.raises(ValidationError):
+        HlConfig(max_leverage=4.0)
+    with pytest.raises(ValidationError):
+        HlConfig(top_n=6)                            # ceiling is 5 positions
+    with pytest.raises(ValidationError):
+        HlConfig(slippage_cap_pct=5.0)
+    with pytest.raises(ValidationError):
+        HlConfig(trail_from_peak_pct=60.0)
+    # tightening is welcome — and the generous defaults sit at the ceilingward end
+    assert RiskConfig().daily_pause_pct == 15.0
+    assert RiskConfig().soft_tier_pct == 40.0
+    tighter = RiskConfig(hwm_breaker_pct=40.0, soft_tier_pct=25.0,
+                         soft_tier_clear_pct=15.0, daily_pause_pct=10.0)
+    assert tighter.hwm_breaker_pct == 40.0
     assert MemeConfig(slippage_cap_pct=1.0).slippage_cap_pct == 1.0
 
 
 def test_config_cross_field_coherence():
     with pytest.raises(ValidationError):
-        RiskConfig(soft_tier_clear_pct=35.0)         # hysteresis must be below tier
+        RiskConfig(soft_tier_clear_pct=45.0)         # hysteresis must be below tier
     with pytest.raises(ValidationError):
-        SleevesConfig(boot_allocations={"MEME_ROTATION": 50.0, "CORE_HOLD": 25.0,
-                                        "YIELD": 20.0, "PERPS": 15.0})  # sums 110
+        SleevesConfig(boot_allocations={              # sums to 110
+            "MEME_ROTATION": 35.0, "CORE_HOLD": 25.0, "YIELD": 20.0,
+            "PERPS": 10.0, "HL_ROTATION": 20.0})
+    with pytest.raises(ValidationError):
+        SleevesConfig(boot_allocations={              # missing HL_ROTATION key
+            "MEME_ROTATION": 40.0, "CORE_HOLD": 25.0, "YIELD": 20.0,
+            "PERPS": 15.0})
     with pytest.raises(ValidationError):
         CoreConfig(weights={"SOL": 100.0})           # wrong asset set

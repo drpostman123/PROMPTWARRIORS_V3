@@ -33,10 +33,14 @@ from skyfire_sol.wallet import encrypt_keypair  # noqa: E402
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--out", default="secrets/wallet.age")
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--evm", action="store_true",
+                    help="generate the Hyperliquid (EVM) wallet instead of the "
+                         "Solana one; fund it with USDC via the Arbitrum bridge")
     args = ap.parse_args()
 
-    out = Path(args.out)
+    out = Path(args.out or ("secrets/wallet_hl.age" if args.evm
+                            else "secrets/wallet.age"))
     if out.exists():
         print(f"REFUSING to overwrite existing {out} — move it aside first "
               "(it may hold the only key to funded assets).", file=sys.stderr)
@@ -52,15 +56,23 @@ def main() -> int:
         print("passphrase must be at least 12 characters", file=sys.stderr)
         return 1
 
-    kp = Keypair()
-    blob = encrypt_keypair(kp, passphrase)
+    if args.evm:
+        from skyfire_sol.wallet_evm import EvmWallet
+        w = EvmWallet.generate()
+        blob = w.encrypted(passphrase)
+        pubkey_line = (f"ADDRESS (fund with USDC on Hyperliquid via the "
+                       f"Arbitrum bridge): {w.address}")
+    else:
+        kp = Keypair()
+        blob = encrypt_keypair(kp, passphrase)
+        pubkey_line = f"PUBKEY (fund this from Phantom): {kp.pubkey()}"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.touch(mode=0o600)
     out.write_bytes(blob)
     out.chmod(0o600)
 
     print(f"wrote {out} ({len(blob)} bytes, mode 0600)")
-    print(f"PUBKEY (fund this from Phantom): {kp.pubkey()}")
+    print(pubkey_line)
     print("Keep the passphrase safe — without it the funds are unrecoverable.")
     return 0
 

@@ -69,7 +69,8 @@ def test_allocate_risk_on_presses_winner():
     targets = ceo.allocate(
         perf(MEME_ROTATION=8.0, CORE_HOLD=0.5, YIELD=0.2, PERPS=1.0), regime)
     assert targets.regime is RegimeState.RISK_ON
-    assert targets.targets["MEME_ROTATION"] > 40.0      # pressed above boot
+    boot = AppConfig().sleeves.boot_allocations["MEME_ROTATION"]
+    assert targets.targets["MEME_ROTATION"] > boot      # pressed above boot
     assert sum(targets.targets.values()) == pytest.approx(100.0)
     assert "pressing MEME_ROTATION" in targets.reasoning
 

@@ -25,14 +25,19 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 HARD_SLIPPAGE_MEME_PCT = 3.0          # max price impact / slippage on meme swaps
 HARD_SLIPPAGE_MAJOR_PCT = 0.5         # max on SOL/wBTC/wETH/USDC/jitoSOL swaps
 HARD_HWM_BREAKER_PCT = 60.0           # -60% from high-water mark: full stop
-HARD_SOFT_TIER_PCT = 30.0             # -30%: MEME+PERPS halve, no new entries
-HARD_DAILY_PAUSE_PCT = 10.0           # -10% in a day: 24h entry pause
+# Generous ladder (operator choice): the soft tier and daily pause sit wide so
+# the bot runs hot; the -60% hard stop is the line that never moves.
+HARD_SOFT_TIER_PCT = 45.0             # ceiling; default -40%: MEME+PERPS+HL halve
+HARD_DAILY_PAUSE_PCT = 20.0           # ceiling; default -15% in a day: 24h pause
 HARD_MAX_MEME_POSITIONS = 5
 HARD_MAX_POSITION_PCT_OF_SLEEVE = 20.0  # per-position, of MEME sleeve NAV
-HARD_CORR_RISK_ON_PCT = 55.0          # MEME+PERPS combined bucket, risk-on
+HARD_CORR_RISK_ON_PCT = 55.0          # MEME+PERPS+HL combined bucket, risk-on
 HARD_CORR_RISK_OFF_PCT = 30.0         # ... risk-off / unknown regime
 HARD_PERPS_MAX_LEVERAGE = 3.0
 HARD_MAX_FUNDING_PCT_HR = 0.05        # don't pay more than this to hold a perp
+HARD_HL_MAX_LEVERAGE = 3.0
+HARD_HL_MAX_POSITIONS = 5
+HARD_HL_SLIPPAGE_PCT = 3.0            # IOC slippage bound on HL market orders
 
 # Canonical mints (mainnet-beta). Pinned here, not user-editable per trade.
 WSOL_MINT = "So11111111111111111111111111111111111111112"
@@ -46,6 +51,7 @@ MAJOR_MINTS = {WSOL_MINT, USDC_MINT, WBTC_MINT, WETH_MINT, JITOSOL_MINT}
 
 class WalletConfig(BaseModel):
     age_key_path: str = "secrets/wallet.age"
+    hl_age_key_path: str = "secrets/wallet_hl.age"   # EVM key for Hyperliquid
 
 
 class RpcConfig(BaseModel):
@@ -122,21 +128,47 @@ class PerpsConfig(BaseModel):
     subaccount_id: int = Field(1, ge=0)   # dedicated subaccount = isolated margin
 
 
+class HlConfig(BaseModel):
+    """HL_ROTATION — momentum rotation on Hyperliquid perps.
+
+    The universe is HL's high-volume tail with majors excluded, which in
+    practice is the meme/momentum set (PUMP, TRUMP, ...). Long-only
+    rotation: hold the top-N by 24h momentum, drop what falls out of the
+    ranking or trips the trail/funding filters. The HL account is funded
+    manually (USDC via the Arbitrum bridge to the wallet address printed
+    by scripts/skyfire_keygen.py --evm)."""
+
+    enabled: bool = True              # inert until secrets/wallet_hl.age exists
+    base_url: str = "https://api.hyperliquid.xyz"
+    top_n: int = Field(3, gt=0, le=HARD_HL_MAX_POSITIONS)
+    min_day_volume_usd: float = Field(20_000_000.0, gt=0)
+    exclude: list[str] = ["BTC", "ETH", "SOL", "HYPE"]   # majors are CORE's job
+    max_leverage: float = Field(1.0, gt=0, le=HARD_HL_MAX_LEVERAGE)
+    max_funding_pct_hr: float = Field(0.05, gt=0, le=HARD_MAX_FUNDING_PCT_HR)
+    slippage_cap_pct: float = Field(1.0, gt=0, le=HARD_HL_SLIPPAGE_PCT)
+    trail_from_peak_pct: float = Field(40.0, gt=0, le=40.0)
+    min_order_usd: float = Field(15.0, gt=10.0)   # HL rejects orders under $10
+    loop_seconds: float = Field(300.0, ge=60.0)
+
+
 class SleevesConfig(BaseModel):
     # Boot-state allocation targets only — the CEO owns them at runtime.
+    # MEME+PERPS+HL = 55 = the risk-on correlation-bucket cap.
     boot_allocations: dict[str, float] = {
-        "MEME_ROTATION": 40.0, "CORE_HOLD": 25.0, "YIELD": 20.0, "PERPS": 15.0}
+        "MEME_ROTATION": 25.0, "CORE_HOLD": 25.0, "YIELD": 20.0,
+        "PERPS": 10.0, "HL_ROTATION": 20.0}
     core: CoreConfig = CoreConfig()
     meme: MemeConfig = MemeConfig()
     yield_: YieldConfig = Field(default=YieldConfig(), alias="yield")
     perps: PerpsConfig = PerpsConfig()
+    hl: HlConfig = HlConfig()
 
     model_config = {"populate_by_name": True}
 
     @field_validator("boot_allocations")
     @classmethod
     def _alloc_sane(cls, v: dict[str, float]) -> dict[str, float]:
-        expected = {"MEME_ROTATION", "CORE_HOLD", "YIELD", "PERPS"}
+        expected = {"MEME_ROTATION", "CORE_HOLD", "YIELD", "PERPS", "HL_ROTATION"}
         if set(v) != expected:
             raise ValueError(f"boot_allocations keys must be {sorted(expected)}")
         if abs(sum(v.values()) - 100.0) > 1e-6:
@@ -147,15 +179,20 @@ class SleevesConfig(BaseModel):
 
 
 class RiskConfig(BaseModel):
+    # Generous defaults by operator choice; ceilings are the law above.
     hwm_breaker_pct: float = Field(60.0, gt=0, le=HARD_HWM_BREAKER_PCT)
-    soft_tier_pct: float = Field(30.0, gt=0, le=HARD_SOFT_TIER_PCT)
-    soft_tier_clear_pct: float = Field(20.0, gt=0)
-    daily_pause_pct: float = Field(10.0, gt=0, le=HARD_DAILY_PAUSE_PCT)
+    soft_tier_pct: float = Field(40.0, gt=0, le=HARD_SOFT_TIER_PCT)
+    soft_tier_clear_pct: float = Field(30.0, gt=0)
+    daily_pause_pct: float = Field(15.0, gt=0, le=HARD_DAILY_PAUSE_PCT)
     daily_pause_hours: float = Field(24.0, ge=24.0)
     corr_risk_on_pct: float = Field(55.0, gt=0, le=HARD_CORR_RISK_ON_PCT)
     corr_risk_off_pct: float = Field(30.0, gt=0, le=HARD_CORR_RISK_OFF_PCT)
-    probation_size_frac: float = Field(0.5, gt=0, le=0.5)     # first-session throttle
-    probation_clean_fills: int = Field(10, ge=10)
+    # Probation: size throttle until the OPERATOR pushes the full-size button
+    # (MCP go_full_size / touch state/skyfire/FULL_SIZE). No auto-lift — the
+    # CEO's verdict multiplier modulates size within probation, but only a
+    # human ends it. clean_fills is tracked as a readiness signal only.
+    probation_size_frac: float = Field(0.5, gt=0, le=0.5)
+    probation_clean_fills: int = Field(10, ge=1)      # display target, not a trigger
     clean_fill_slippage_pct: float = Field(1.0, gt=0)  # realized slip to count "clean"
     nav_stale_entries_off_s: float = Field(60.0, gt=0)
     nav_quarantine_jump_pct: float = Field(20.0, gt=0)
