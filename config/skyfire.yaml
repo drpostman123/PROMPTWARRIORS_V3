@@ -1,0 +1,109 @@
+# SKYFIRE_SOL — live configuration.
+#
+# Every number here can TIGHTEN a hard ceiling baked into
+# src/skyfire_sol/config.py, never loosen it (pydantic rejects the file
+# otherwise). Secrets NEVER live here — they come from the environment:
+#   HELIUS_API_KEY          (required for live RPC)
+#   SKYFIRE_KEY_PASSPHRASE  (required — decrypts secrets/wallet.age)
+#   BIRDEYE_API_KEY         (optional enrichment)
+#   JUPITER_API_KEY         (optional, for api.jup.ag keyed tier)
+
+wallet:
+  age_key_path: secrets/wallet.age
+
+rpc:
+  url: "https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}"
+  fallback_url: "https://api.mainnet-beta.solana.com"
+  commitment: confirmed
+  max_requests_per_second: 8.0     # Helius free tier headroom
+  confirm_timeout_s: 60.0
+
+jupiter:
+  base_url: "https://lite-api.jup.ag"   # probed 2026-08: v6 host is gone;
+                                        # swap/v1 has the same schema.
+                                        # Use https://api.jup.ag with JUPITER_API_KEY.
+  max_requests_per_second: 1.0
+  quote_ttl_s: 10.0                # executor re-quotes anything older
+
+discovery:
+  poll_seconds: 60
+  min_liquidity_usd: 100000        # hard floor (can only be raised)
+  min_token_age_minutes: 60        # skip the launch-snipe kill box
+  max_top10_holder_pct: 30
+  min_lp_lock_days: 30
+  rug_verdict_ttl_minutes: 10
+  sell_test_usd: 50
+  max_candidates_per_cycle: 15
+  dexscreener_rps: 4.0
+  birdeye_rps: 0.8
+  rugcheck_rps: 2.0
+
+sleeves:
+  # Boot state ONLY — the CEO owns allocation at runtime (inside gate clamps).
+  boot_allocations:
+    MEME_ROTATION: 40
+    CORE_HOLD: 25
+    YIELD: 20
+    PERPS: 15
+  meme:
+    max_positions: 5
+    max_position_pct_of_sleeve: 20   # = 8% of portfolio at 40% sleeve
+    slippage_cap_pct: 3.0
+    take_profit_mult: 2.0            # standing 2x target...
+    take_profit_sell_frac: 0.5       # ...sell half, runner rides
+    trail_from_peak_pct: 40
+    time_stop_hours: 48              # rotation means rotate
+    min_vol_accel: 1.5               # 1h volume vs (6h/6) baseline
+    ema_period_minutes: 60
+    blowoff_atr_mult: 2.0
+    min_entry_usd: 10
+  core:
+    weights: {SOL: 40, wBTC: 20, wETH: 15, USDC: 25}
+    rebalance_band_pct: 5
+    slippage_cap_pct: 0.5
+  yield:
+    venue: jitosol                   # LP venue is a fast-follow
+    slippage_cap_pct: 0.5
+    min_conversion_usd: 25
+  perps:
+    enabled: false                   # ships last (build order §7) — flip when
+                                     # the Drift subaccount is funded
+    market: SOL-PERP
+    max_leverage: 3.0
+    max_funding_pct_hr: 0.05
+    subaccount_id: 1
+
+risk:
+  hwm_breaker_pct: 60        # -60% from high-water mark -> flatten to USDC, halt
+  soft_tier_pct: 30          # -30%: MEME+PERPS halve, no new entries...
+  soft_tier_clear_pct: 20    # ...until back above -20%
+  daily_pause_pct: 10        # -10% in a day -> 24h entry pause (positions held)
+  daily_pause_hours: 24
+  corr_risk_on_pct: 55       # MEME+PERPS are ONE risk bucket
+  corr_risk_off_pct: 30
+  probation_size_frac: 0.5   # first-session throttle
+  probation_clean_fills: 10  # auto-lift after 10 fills within tolerance
+  clean_fill_slippage_pct: 1.0
+  nav_stale_entries_off_s: 60
+  nav_quarantine_jump_pct: 20
+
+ceo:
+  loop_seconds: 300          # 5-min loop + event wakeups
+  sharpe_weight: 0.6
+  ret24_weight: 0.4
+  winner_press_gain: 1.5     # >1 = greedy: overweight recent winners
+  sol_trend_ema_fast_h: 6
+  sol_trend_ema_slow_h: 48
+  breadth_risk_on: 0.55
+  breadth_risk_off: 0.35
+
+data:
+  state_dir: state/skyfire
+  log_dir: logs
+  db_path: state/skyfire/skyfire.db
+  snapshot_path: state/skyfire/snapshot.json
+  decision_log_path: state/skyfire/decisions.jsonl
+  trade_log_path: state/skyfire/trades.jsonl
+  heartbeat_path: state/skyfire/heartbeat.json
+  heartbeat_seconds: 5
+  snapshot_seconds: 2
