@@ -58,6 +58,18 @@ TOOLS = [
      "description": "Re-engage the probation size throttle (deletes the "
                     "FULL_SIZE button file).",
      "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "policy_status",
+     "description": "Current learned policy (version, parameters, frozen "
+                    "state) + the last N learner conclusions with rewards.",
+     "inputSchema": {"type": "object", "properties": {
+         "n": {"type": "integer", "default": 10}}}},
+    {"name": "freeze_policy",
+     "description": "Freeze the self-improving loop: the learner keeps "
+                    "evaluating and journaling but applies nothing.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "unfreeze_policy",
+     "description": "Unfreeze the self-improving loop (deletes POLICY_FREEZE).",
+     "inputSchema": {"type": "object", "properties": {}}},
 ]
 
 
@@ -147,6 +159,34 @@ class Monitor:
         except FileNotFoundError:
             pass
         return {"probation": True}
+
+    def policy_status(self, n: int = 10) -> dict:
+        out: dict = {"policy": self._read_json("policy.json"),
+                     "frozen": (self.dir / "POLICY_FREEZE").exists()}
+        try:
+            with self._db() as db:
+                db.row_factory = sqlite3.Row
+                rows = db.execute(
+                    "SELECT ts, kind, applied, frozen, samples, train_reward, "
+                    "val_reward, incumbent_val_reward, policy_version, reasoning "
+                    "FROM policy_updates ORDER BY id DESC LIMIT ?", (n,)).fetchall()
+            out["recent_conclusions"] = [dict(r) for r in rows]
+        except sqlite3.Error as e:
+            out["recent_conclusions"] = [{"error": str(e)}]
+        return out
+
+    def freeze_policy(self) -> dict:
+        (self.dir / "POLICY_FREEZE").write_text(
+            f"frozen via MCP {datetime.now(timezone.utc).isoformat()}\n")
+        return {"frozen": True,
+                "note": "learner keeps journaling proposals; nothing applies"}
+
+    def unfreeze_policy(self) -> dict:
+        try:
+            (self.dir / "POLICY_FREEZE").unlink()
+        except FileNotFoundError:
+            pass
+        return {"frozen": False}
 
 
 def handle(monitor: Monitor, req: dict) -> dict | None:

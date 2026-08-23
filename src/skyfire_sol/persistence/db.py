@@ -70,6 +70,19 @@ CREATE TABLE IF NOT EXISTS nav_history (
   nav_usd REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_nav_sleeve_ts ON nav_history (sleeve, ts);
+
+CREATE TABLE IF NOT EXISTS policy_updates (
+  id INTEGER PRIMARY KEY,
+  ts TEXT NOT NULL,
+  kind TEXT NOT NULL,                 -- 'entry' | 'press'
+  before_json TEXT, after_json TEXT,
+  train_reward REAL, val_reward REAL, incumbent_val_reward REAL,
+  samples INTEGER,
+  applied INTEGER DEFAULT 0,
+  frozen INTEGER DEFAULT 0,
+  policy_version INTEGER,
+  reasoning TEXT
+);
 """
 
 

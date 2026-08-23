@@ -113,6 +113,18 @@ def test_ceo_import_hygiene():
                 f"{py.name} imports {imp} — the CEO must not reach the action layer"
 
 
+FORBIDDEN_FOR_LEARNING = FORBIDDEN_FOR_CEO + ("skyfire_sol.ceo",)
+
+
+def test_learning_import_hygiene():
+    """The learner produces a Policy (data). It must not reach the action
+    layer, nor the CEO (no optimizer may rewrite another optimizer)."""
+    for py in (PKG_ROOT / "learning").rglob("*.py"):
+        for imp in _imports_of(py):
+            assert not imp.startswith(FORBIDDEN_FOR_LEARNING), \
+                f"{py.name} imports {imp}"
+
+
 def test_sleeves_never_import_executor_or_wallet():
     for py in (PKG_ROOT / "sleeves").rglob("*.py"):
         for imp in _imports_of(py):

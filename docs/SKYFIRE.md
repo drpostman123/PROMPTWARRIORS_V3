@@ -102,11 +102,41 @@ daily ≤20, soft ≤45), never loosen past the ceilings.
 |---|---|---|
 | Kill needed NOW | — | `touch state/skyfire/KILL` (or MCP `kill` tool). Everything halts and flattens (both venues). Delete the file to re-enable. |
 | Ready for full size | — | MCP `go_full_size` or `touch state/skyfire/FULL_SIZE`. This is the only way probation lifts. |
+| Learner acting oddly | policy updates journaled in `policy_updates` | MCP `freeze_policy` (or `touch state/skyfire/POLICY_FREEZE`); it keeps journaling proposals without applying them |
 | −15% day | 24h entry pause, positions held | none — clears itself; survives restarts |
 | −40% from HWM | MEME+PERPS+HL halved, no new entries until −30% | none — hysteresis clears it |
 | −60% from HWM | full liquidation to USDC (both venues), LOCKED | investigate; to re-arm: set `SKYFIRE_ACK_DRAWDOWN=YES` in the env, restart, then **remove the variable** |
 | Corrupt/missing safety state | boots LOCKED (fail-safe) | inspect `state/skyfire/*.json`, fix or delete deliberately |
 | PERPS go-live | — | fund the Drift subaccount, `pip install ".[perps]"`, set `sleeves.perps.enabled: true`, verify the driftpy API surface on the first order |
+
+## Self-improving loop
+
+The learner (`src/skyfire_sol/learning/`) closes the grounded reward
+loop every 6 hours, under the same Goodhart discipline as everything
+else — it tunes **alpha only**, inside hard bounds it cannot widen, and
+no safety parameter is reachable from it:
+
+- **Entry policy** (`min_vol_accel` + score weights): replays every
+  resolved phantom candidate in hourly batches with top-N slot scarcity
+  — "who would this parameter set have picked, and what did those
+  tokens actually do at 6h?" Dead tokens count as −100%; rewards are
+  winsorized at +300% so one outlier can't hijack the policy.
+- **CEO press gain** (`winner_press_gain`): replays every historical
+  risk-on allocation against realized next-24h sleeve returns — "how
+  hard should the winner have been pressed?"
+
+Adoption discipline: minimum evidence floors (200 resolved phantom
+rows / 15 press events), then walk-forward validation — candidates are
+searched on the older 70% of data and adopted only if they also beat
+the incumbent on the newest 30% by a margin. Every conclusion (adopted,
+rejected, or frozen) lands in the `policy_updates` table with rewards
+and reasoning; the live policy is `state/skyfire/policy.json`
+(versioned, clamped, fail-safe to defaults if unreadable).
+
+Operator controls: MCP `policy_status` shows the current version and
+recent conclusions; `freeze_policy` / `unfreeze_policy` (or
+`touch state/skyfire/POLICY_FREEZE`) halts application while the
+learner keeps journaling what it *would* have done.
 
 ## Monitoring
 

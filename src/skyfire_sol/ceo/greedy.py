@@ -50,9 +50,17 @@ def _ema(values: list[float], period: int) -> Optional[float]:
 
 
 class GreedyCeo:
-    def __init__(self, cfg: AppConfig) -> None:
+    def __init__(self, cfg: AppConfig, policy_store=None) -> None:
+        # policy_store (learning.policy.PolicyStore) supplies the learned
+        # winner_press_gain within its hard bounds; None falls back to config.
         self._cfg = cfg
+        self._policy_store = policy_store
         self._sol_hourly: list[tuple[datetime, float]] = []   # hour-bucketed marks
+
+    def _press_gain(self) -> float:
+        if self._policy_store is not None:
+            return self._policy_store.current.winner_press_gain
+        return self._cfg.ceo.winner_press_gain
 
     # -- inputs -----------------------------------------------------------
 
@@ -147,9 +155,10 @@ class GreedyCeo:
             # the gate clamps the MEME+PERPS bucket to 55%).
             targets = dict(boot)
             if scores:
+                gain = self._press_gain()
                 winner = max(scores, key=scores.get)          # type: ignore[arg-type]
-                targets[winner] = targets.get(winner, 0.0) * self._cfg.ceo.winner_press_gain
-                reasoning = (f"risk_on: pressing {winner} x{self._cfg.ceo.winner_press_gain} "
+                targets[winner] = targets.get(winner, 0.0) * gain
+                reasoning = (f"risk_on: pressing {winner} x{gain} "
                              f"(scores {dict((k, round(v, 3)) for k, v in scores.items())})")
             else:
                 reasoning = "risk_on: no perf history yet, boot weights"

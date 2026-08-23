@@ -74,6 +74,7 @@ class Scanner:
         phantom: PhantomLog,
         blacklist: Blacklist,
         publish: Callable[[str, object], Awaitable[None]],
+        policy_store=None,                    # learning.policy.PolicyStore
     ) -> None:
         self._cfg = cfg
         self._dex = dex
@@ -84,6 +85,7 @@ class Scanner:
         self._phantom = phantom
         self._blacklist = blacklist
         self._publish = publish
+        self._policy_store = policy_store
 
         self._seen: dict[str, datetime] = {}
         self._holder_history: dict[str, int] = {}
@@ -156,7 +158,8 @@ class Scanner:
                     features=features_of(facts), price_usd=facts.price_usd, ts=now))
                 continue
 
-            sig = entry_engine.score(facts, self._cfg.sleeves.meme)
+            policy = self._policy_store.current if self._policy_store else None
+            sig = entry_engine.score(facts, self._cfg.sleeves.meme, policy=policy)
             if sig is None:
                 await self._phantom.record(PhantomCandidate(
                     mint=mint, symbol=facts.symbol, stage="entry_reject",

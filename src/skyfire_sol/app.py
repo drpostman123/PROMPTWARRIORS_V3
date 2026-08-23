@@ -42,6 +42,8 @@ from skyfire_sol.config import (
 )
 from skyfire_sol.discovery.scanner import Blacklist, Scanner
 from skyfire_sol.execution.executor import ExecutionAgent
+from skyfire_sol.learning.learner import Learner
+from skyfire_sol.learning.policy import PolicyStore
 from skyfire_sol.models import (
     IntentKind,
     RegimeRead,
@@ -108,11 +110,13 @@ class SkyfireApp:
         self.kill = KillSwitch(cfg.data.state_dir)
         self.blacklist = Blacklist(cfg.data.state_dir)
         self.phantom = PhantomLog(self.bus.publish)
-        self.ceo = GreedyCeo(cfg)
+        self.policy = PolicyStore(cfg, cfg.data.state_dir)
+        self.ceo = GreedyCeo(cfg, policy_store=self.policy)
+        self.learner = Learner(self.db, self.policy, self.bus.publish)
 
         self.scanner = Scanner(cfg, self.dex, self.rug, self.birdeye, self.jup,
                                self.rpc, self.phantom, self.blacklist,
-                               self.bus.publish)
+                               self.bus.publish, policy_store=self.policy)
         # Hyperliquid: EVM wallet + venue, only if the key file exists.
         self.hl_venue = None
         self.hl = None
@@ -208,6 +212,7 @@ class SkyfireApp:
             ("safety_watch", self._safety_watch),
             ("snapshot", self._snapshot_task),
             ("backfill", self.backfill.run),
+            ("learner", self.learner.run),
         ]
         if self.hl is not None:
             tasks.append(("hl", self.hl.run))
@@ -453,6 +458,9 @@ class SkyfireApp:
                 "regime": snap.regime.state.value,
                 "safety": vars(snap.safety),
                 "probation_clean_fills": self.probation.clean_fills,
+                "policy": {"version": self.policy.current.version,
+                           "origin": self.policy.current.origin,
+                           "frozen": self.policy.frozen},
             })
             now = datetime.now(timezone.utc).timestamp()
             if now - last_hb >= self.cfg.data.heartbeat_seconds:

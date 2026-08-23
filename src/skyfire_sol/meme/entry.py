@@ -46,12 +46,17 @@ def is_blowoff(price_change_1h_pct: Optional[float], atr_pct: Optional[float],
 
 
 def score(f: TokenFacts, cfg: MemeConfig, ema_price_usd: Optional[float] = None,
-          atr_pct: Optional[float] = None) -> Optional[EntrySignal]:
-    """None = not a candidate (missing data or a veto). Higher score = better."""
+          atr_pct: Optional[float] = None, policy=None) -> Optional[EntrySignal]:
+    """None = not a candidate (missing data or a veto). Higher score = better.
+
+    ``policy`` (learning.policy.Policy) overrides the tunable alpha
+    knobs — threshold and score weights — inside its hard bounds; the
+    vetoes (holder shrink, below-EMA, blowoff) are not tunable."""
     if f.price_usd is None:
         return None
+    min_accel = policy.min_vol_accel if policy is not None else cfg.min_vol_accel
     accel = vol_acceleration(f)
-    if accel is None or accel < cfg.min_vol_accel:
+    if accel is None or accel < min_accel:
         return None
     growth = holder_growth(f)
     if growth is not None and growth <= 0:
@@ -68,7 +73,10 @@ def score(f: TokenFacts, cfg: MemeConfig, ema_price_usd: Optional[float] = None,
     if blow:
         return None
     liq_bonus = min((f.liquidity_usd or 0.0) / 1_000_000.0, 1.0)
-    s = accel * 10.0 + growth * 100.0 + liq_bonus * 5.0
+    w_accel = policy.w_accel if policy is not None else 10.0
+    w_growth = policy.w_growth if policy is not None else 100.0
+    w_liq = policy.w_liq if policy is not None else 5.0
+    s = accel * w_accel + growth * w_growth + liq_bonus * w_liq
     return EntrySignal(
         mint=f.mint, symbol=f.symbol, score=round(s, 3), vol_accel=accel,
         holder_growth=growth, above_ema=above_ema, blowoff=blow,
