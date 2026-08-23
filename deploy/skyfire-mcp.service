@@ -1,0 +1,41 @@
+# SKYFIRE MCP monitor — a SEPARATE process from the trading runtime.
+# Install: cp deploy/skyfire-mcp.service /etc/systemd/system/
+#
+# Read-only over snapshot/heartbeat/journals/DB, plus exactly one write:
+# the KILL file. ReadWritePaths is therefore ONLY the state dir; the
+# monitor holds no wallet, no RPC and no executor — a compromised
+# monitor can observe and halt, nothing else.
+#
+# This unit runs the server on stdio for a socket-attached MCP client
+# (e.g. via systemd-socket-proxyd or an SSH ForceCommand). The simplest
+# remote setup needs no unit at all:
+#   ssh box "cd /opt/skyfire && venv/bin/python -m skyfire_sol.monitoring.mcp"
+# wired as a stdio MCP server in the client config.
+
+[Unit]
+Description=SKYFIRE MCP monitoring endpoint (read-only + kill switch)
+After=network-online.target
+
+[Service]
+Type=simple
+User=skyfire
+Group=skyfire
+WorkingDirectory=/opt/skyfire
+ExecStart=/opt/skyfire/venv/bin/python -m skyfire_sol.monitoring.mcp --state-dir /opt/skyfire/state/skyfire
+StandardInput=socket
+StandardOutput=socket
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/skyfire/state/skyfire
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

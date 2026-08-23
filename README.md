@@ -1,3 +1,18 @@
+# PROMPTWARRIORS trading monorepo
+
+Two live trading systems over a shared `tradecore` skeleton (src/ layout):
+
+| System | Package | Docs |
+|---|---|---|
+| **GodMode0DTE** — selective 0DTE debit verticals on Tastytrade | `src/godmode0dte` (+ `_v2`) | this README, `docs/DESIGN_SPEC.md` |
+| **SKYFIRE_SOL** — Solana meme-coin momentum rotation with a greedy CEO allocator inside a SafetyGate | `src/skyfire_sol` | `docs/SKYFIRE.md` |
+
+Shared infrastructure (`src/tradecore`): structured logging, atomic
+snapshot/JSONL state store, generic state machine, supervised-task loop.
+Capability tokens are *not* shared — each system mints its own.
+
+---
+
 # GodMode0DTE
 
 An **extremely selective**, defined-risk 0DTE options system for Tastytrade.

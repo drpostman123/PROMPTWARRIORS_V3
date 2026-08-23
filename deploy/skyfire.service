@@ -1,0 +1,73 @@
+# SKYFIRE_SOL trading runtime — systemd unit.
+# Install: cp deploy/skyfire.service /etc/systemd/system/ && systemctl daemon-reload
+#
+# NOTES (load-bearing, do not "clean up"):
+# - WorkingDirectory is MANDATORY: every safety-state path is CWD-relative
+#   (state/skyfire/hwm.json, daily.json, probation.json, blacklist.json,
+#   KILL). Running from another directory silently re-arms a tripped -60%
+#   breaker and forgets the honeypot blacklist.
+# - KillSignal=SIGINT: __main__.py handles KeyboardInterrupt; SIGTERM would
+#   hard-kill the loop and skip the BaseException crash path in app.start()
+#   (persist breaker trip FIRST, then best-effort flatten).
+# - NO restart timer, unlike godmode: crypto is 24/7 and the daily -10%
+#   baseline rolls at UTC midnight in-process (breakers.on_nav). Do not add
+#   a "cleanup" nightly restart — a restart mid-drawdown re-reads persisted
+#   state correctly, but there is no reason to interrupt live exits.
+# - EnvironmentFile carries the secrets: HELIUS_API_KEY,
+#   SKYFIRE_KEY_PASSPHRASE (decrypts secrets/wallet.age), optional
+#   BIRDEYE_API_KEY / JUPITER_API_KEY, and SKYFIRE_ACK_DRAWDOWN=YES only
+#   when an operator deliberately re-arms after a -60% trip (REMOVE IT
+#   again right after the restart).
+
+[Unit]
+Description=SKYFIRE_SOL Solana meme-rotation runtime
+Documentation=file:/opt/skyfire/docs/SKYFIRE.md
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=skyfire
+Group=skyfire
+WorkingDirectory=/opt/skyfire
+EnvironmentFile=/etc/skyfire/env
+ExecStart=/opt/skyfire/venv/bin/python -m skyfire_sol --config /opt/skyfire/config/skyfire.yaml
+
+# Graceful shutdown: SIGINT -> KeyboardInterrupt -> cancel -> crash path.
+KillSignal=SIGINT
+TimeoutStopSec=90
+SendSIGKILL=yes
+FinalKillSignal=SIGKILL
+
+# Restart on failure with backoff; clean stop does not restart.
+Restart=on-failure
+RestartSec=15
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/skyfire/state /opt/skyfire/logs
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
