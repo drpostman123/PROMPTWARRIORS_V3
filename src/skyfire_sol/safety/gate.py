@@ -9,8 +9,8 @@ The CEO operates INSIDE this gate, never above it:
    wallet, chain, or clients (pinned by an AST test).
 3. State ownership: breaker/probation/pause files are written only by
    safety/; the CEO sees a read-only mirror on the blackboard.
-4. Single submit chokepoint: the executor holds the only
-   sendTransaction call site (pinned by a source-scan test).
+4. Single submit chokepoint: the executor is the only caller of the RPC
+   submit path in chain/helius.py (pinned by a source-scan test).
 
 Check pipeline (fixed order, first failure rejects, every decision
 journaled with a full trace):
