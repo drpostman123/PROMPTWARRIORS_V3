@@ -1,4 +1,7 @@
-# Prediction-Market Arbitrage Bot — Strategy & Build Plan (v0.1, 2026-09-18)
+# Weevil — Prediction-Market Arbitrage Strategy & Build Plan (v0.2, 2026-09-18)
+
+> v0.2: Weevil is greenfield and forks `warproxxx/poly-maker` (see `WEEVIL_REPO_SURVEY.md`).
+> Nothing in this plan depends on any other code in this repository.
 
 Goal as stated: a 24/7 automated system that makes a couple of dollars per trade,
 thousands of times, by finding pricing mistakes in prediction markets that expose
@@ -164,7 +167,8 @@ Build after the core engine; it reuses the executor unchanged.
 | **nanare-sudo/kalshi-polymarket-spreads** | 3-stage matcher (blocking → IDF token overlap → rule verification + optional LLM), executable-spread calc that walks both books per level with fees | — |
 | **pmxt-dev/pmxt**, **guzus/dr-manhattan** | Market discovery across venues, reference implementations of each venue's quirks | Hot-path execution |
 | **braedonsaunders/homerun** (Python) | Strategy plugin interface, backtest → paper → live pipeline, dashboard | Monolith |
-| **This repo (godmode0dte)** | `RiskGovernor` capability-token pattern, disk-persisted circuit breaker, config ceilings that can only tighten, `edge_report.py` Wilson-bound sizing, systemd deploy bundle | Options-specific everything |
+| **warproxxx/poly-maker** (MIT, Python 3.12, 7.3k LOC, 113 tests) | **The fork base.** Maker-only CLOB V2 quoter whose BUY-YES + BUY-NO pair merges to USDC at locked edge; regime machine, heartbeat dead-man, WS-staleness halts, daily-loss kill, on-chain merge for EOA/Safe/Deposit wallets, WS + order journal | Political-only market selection, `py-clob-client-v2` pin, no NegRisk convert, no replay backtester |
+| **Polymarket/py-sdk** (official, MIT) | Execution primitive: CLOB + Gamma + Data + relayer, WS streams, fee schedule, batch merge/split/redeem | — |
 | Historical data: Telonex, PolymarketData, Marketlens, Lychee (Kalshi 36 GB), Kalshi `/historical/*` | L2 replay for backtests before our own recorder has depth | Paid; buy only what Phase 0 shows we need |
 
 ---
@@ -203,7 +207,7 @@ Build after the core engine; it reuses the executor unchanged.
                                  ──▶ graduation gates ──▶ Prometheus/Grafana + Telegram
 ```
 
-### 4.1 Design rules (non-negotiable, lifted from the antipattern list + this repo)
+### 4.1 Design rules (non-negotiable, lifted from the antipattern list and poly-maker's hardening tests)
 
 1. **Maker-first.** Default order type is post-only limit. A taker leg is allowed only
    when the governor confirms `net_edge ≥ min_edge` *including* that leg's fee at that
@@ -219,7 +223,8 @@ Build after the core engine; it reuses the executor unchanged.
    and overwrites. Rows without a real fill price are `suspect`, excluded from gates.
 6. **Governor token.** Scanners emit plain `Opportunity` data; only
    `RiskGovernor.evaluate()` can construct an `ApprovedOrder`; executors refuse
-   anything else (copy the `_APPROVAL_TOKEN` pattern from `godmode0dte/risk/governor.py`).
+   anything else (a frozen dataclass whose constructor checks a module-private token).
+   poly-maker's `RiskManager.evaluate()` is the seam where this goes.
 7. **Fail closed.** Corrupt state → locked. WS gap → cancel all resting quotes for
    that market until the snapshot is rebuilt. Stale reference feed → class disabled.
 8. **One process per venue shard, one writer per journal.** Prefix IDs per process.
@@ -264,20 +269,22 @@ conservative queue-position model, not a live bot.
 
 ### 4.4 Stack
 
-- Python 3.11, asyncio, `httpx`, `websockets`, `py-clob-client` (Polymarket), thin
-  hand-written Kalshi client (auth = RSA-PSS signed headers; WS same), `pydantic`
-  config with ceilings, `structlog`, DuckDB + Parquet for recordings, SQLite (Postgres
-  later) for the journal, Prometheus client + Grafana, Telegram alerts, systemd units
-  (reuse `deploy/`). Python is fast enough: a maker strategy is bound by fill rate and
-  correctness, not by microseconds. If a specific loop needs speed later, isolate it.
+- Inherited from poly-maker: Python 3.12, `uv`, asyncio + uvloop, `httpx`, `websockets`,
+  `pydantic` config, `structlog`, SQLite state, typer CLI, ruff + mypy strict.
+  Added: `polymarket-client` (official py-sdk) replacing `py-clob-client-v2`,
+  `kalshi_python_async` + own Kalshi WS client, DuckDB + Parquet for book recordings,
+  Prometheus client + Grafana, Telegram alerts, systemd units. Python is fast enough:
+  a maker strategy is bound by fill rate and correctness, not by microseconds.
 - VPS in US-East (where both matching engines are commonly reported to live — verify
   with our own RTT tests before committing), 2 vCPU / 4 GB is plenty for the recorder
   and scanners; keep it separate from the 0DTE box.
-- Package layout in this repo: new top-level package `pmarb/` (config, models,
-  venues/{polymarket,kalshi}, recorder, scanners, risk, execution, journal,
-  reconcile, dashboard), `tests/pmarb/`, `scripts/pmarb_*`. Copy the governor/breaker
-  patterns from `godmode0dte`; do not import across (different domain, different
-  release cadence).
+- Repository: Weevil lives in its own fresh repository, forked from poly-maker and
+  renamed (`src/weevil/…`). Layout grows from poly-maker's: `catalog/` (discovery, +
+  sports/NegRisk/Kalshi), `marketdata/` (+ recorder), `strategy/` (+ set-completion
+  state machine, NegRisk basket), `scanners/` (new: kalshi ladder/field-sum,
+  cross-venue, convergence), `risk/` (+ governor token, breaker persistence),
+  `execution/` (gateway on py-sdk, Kalshi gateway, merge/convert), `journal/` +
+  `reconcile/` (new), `replay/` (new backtester over journals).
 
 ---
 
@@ -285,10 +292,10 @@ conservative queue-position model, not a live bot.
 
 | Phase | Build | Exit criterion (measured, not assumed) |
 |---|---|---|
-| **0. Record & study** (week 1–2) | Recorder on Polymarket market channel for top-N markets by 24 h volume + every NegRisk event + Kalshi orderbook_delta for the matching series; fee-rate and neg_risk metadata; offline notebooks that count set-completion opportunities net of fees by category × hour × size, one-legged fill probability proxies, Kalshi ladder/field-sum survivors after exact verification | A written "category report": opportunities/day, median net ¢/share, depth, persistence, by category. Go/no-go per class. |
+| **0. Fork & record** (week 1–2) | Fork poly-maker → weevil, read every module, run its test suite, migrate the gateway to py-sdk; extend its journal into a recorder on the Polymarket market channel for top-N markets by 24 h volume + every NegRisk event + Kalshi orderbook_delta for the matching series; fee-rate and neg_risk metadata; offline notebooks that count set-completion opportunities net of fees by category × hour × size, one-legged fill probability proxies, Kalshi ladder/field-sum survivors after exact verification | A written "category report": opportunities/day, median net ¢/share, depth, persistence, by category. Go/no-go per class. |
 | **1. Replay + paper** (week 2–4) | Book-replay simulator with conservative maker fill model (fill only when price trades through, not at); full governor; paper executors; journal + reconciliation code paths exercised against real Data API reads | ≥ 200 simulated set completions; paper net ¢/share within the recorded distribution; zero governor bypass paths (tests). |
 | **2. Live canary** (week 4–6) | Polymarket only, S1 + S2, $300–500 deployed, sizes floor-min, everything else identical to paper | ≥ 100 live completions; live/paper degradation measured (expect 20–40 % worse); rebates observed arriving daily; no reconciliation drift. |
-| **3. Scale ladder** | Wilson-lower-bound gates copied from the playbook/this repo (`edge_report.py`): 1× → 2× → 5× only on N ≥ 30/60 fresh live trades, profit factor ≥ 1.5, auto-demote on 3 bad windows or −3 % deployed | Capital scales with evidence, never enthusiasm. |
+| **3. Scale ladder** | Wilson-lower-bound gates per the playbook: 1× → 2× → 5× only on N ≥ 30/60 fresh live trades, profit factor ≥ 1.5, auto-demote on 3 bad windows or −3 % deployed | Capital scales with evidence, never enthusiasm. |
 | **4. Kalshi + cross-venue whitelist** | Kalshi executor (maker), ladder/field-sum executor for exact-verified survivors only, cross-venue for settlement-identical pairs with LLM rule diff + human approval per pair | Each new class repeats phases 1–3 independently. |
 | **5. Event convergence** | Sports final-score, FRED, CF Benchmarks/Chainlink feeds with oracle-matched sources | Same graduation gates. |
 
@@ -322,8 +329,8 @@ plus rebates, compounding via reinvested size — not a few hundred dollars a da
    engine, so it is decision #1.
 2. **Capital and risk tolerance.** Starting working capital and the daily-loss lock
    (proposal: $3–5 K, −3 % day lock, 25 % max per market, 40 % max one-legged).
-3. **Language.** Proposal: Python in this repo (`pmarb/`), reusing the risk patterns;
-   revisit only if measured latency, not vibes, says otherwise.
+3. **Repository.** Proposal: a new repository for Weevil (fork of poly-maker), separate
+   from anything you already have. Language is Python by inheritance.
 4. **Data spend.** Are we willing to pay ~$50–200/mo for L2 history + paid Polygon RPC
    + VPS from day one? (Recommended yes for RPC and VPS; history only if needed.)
 
@@ -343,5 +350,6 @@ plus rebates, compounding via reinvested size — not a few hundred dollars a da
 - Window collapse 12.3 s → 2.7 s — https://www.turbinefi.com/blog/prediction-market-arbitrage-latency-speed-2026 ; bots on leaderboard — https://www.financemagnates.com/trending/prediction-markets-are-turning-into-a-bot-playground/
 - Practitioner view of the three real Polymarket arbs — https://polyflux.io/blog/polymarket-arbitrage/ ; NegRisk convert mechanics — https://startpolymarket.com/learn/converting-negative-risk/
 - Playbook (edges, antipatterns, architecture, methodology) — https://github.com/AKCodez/prediction-market-alpha-playbook
-- Template repos — https://github.com/ImMike/polymarket-arbitrage ; https://github.com/pmxt-dev/pmxt ; https://github.com/guzus/dr-manhattan ; https://github.com/braedonsaunders/homerun ; https://github.com/verixiaapps/awesome-prediction-market-apis
+- Repo audit and fork decision — `docs/WEEVIL_REPO_SURVEY.md`; base — https://github.com/warproxxx/poly-maker ; official SDKs — https://github.com/Polymarket/py-sdk , https://docs.kalshi.com/sdks/overview ; NautilusTrader Polymarket adapter — https://nautilustrader.io/docs/latest/integrations/polymarket/ ; bot malware campaigns — https://www.stepsecurity.io/blog/malicious-polymarket-bot-hides-in-hijacked-dev-protocol-github-org-and-steals-wallet-keys , https://www.cryptopolitan.com/defi-polymarket-users-targeted-npm-package/
+- Other template repos — https://github.com/ImMike/polymarket-arbitrage ; https://github.com/pmxt-dev/pmxt ; https://github.com/guzus/dr-manhattan ; https://github.com/braedonsaunders/homerun ; https://github.com/verixiaapps/awesome-prediction-market-apis
 - Historical data vendors — https://telonex.io/ ; https://www.polymarketdata.co/ ; https://marketlens.trade/ ; https://lycheedata.com/kalshi-historical-data ; https://docs.kalshi.com/getting_started/historical_data
