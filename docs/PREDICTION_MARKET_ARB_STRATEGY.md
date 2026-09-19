@@ -1,5 +1,8 @@
 # Weevil — Prediction-Market Arbitrage Strategy & Build Plan (v0.2, 2026-09-18)
 
+> **Superseded venue choice (2026-09-19):** the bot is now *Picador*, built on the Webull OpenAPI. See `PICADOR_WEBULL_PLAN.md`. The fee, market-structure and evidence sections below remain the reference for prediction-market arbitrage in general.
+
+
 > v0.2: Weevil is greenfield and forks `warproxxx/poly-maker` (see `WEEVIL_REPO_SURVEY.md`).
 > Nothing in this plan depends on any other code in this repository.
 

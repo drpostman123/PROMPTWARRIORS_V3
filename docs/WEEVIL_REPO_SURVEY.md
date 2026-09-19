@@ -1,5 +1,8 @@
 # Weevil — Open-Source Base Selection (audited 2026-09-18)
 
+> **Note (2026-09-19):** "Weevil" was a transcription of "Webull". The audit below of third-party prediction-bot repos stands as reference; the Webull-specific repo review and the final plan are in `PICADOR_WEBULL_PLAN.md`.
+
+
 Weevil is a greenfield bot. It does **not** build on any code already in this
 repository. This document records which other people's open-source prediction-bot
 repos were evaluated, how, what was found in the actual code, and which one Weevil
