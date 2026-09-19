@@ -1,5 +1,7 @@
 # PICADOR — Kickoff prompt for a new Claude Code session
 
+> Superseded for the full system by `MASTER_KICKOFF_PROMPT.md`, whose Canonical defaults override the numbers below (committed-stake caps, ladder, gates, S4 removed). Use this file only for a Picador-only build, and apply the canonical defaults.
+
 Copy everything below the line into a fresh Claude Code session on the Ubuntu desktop,
 from inside an empty directory (e.g. `~/code/picador`). It is self-contained; the first
 step pulls the full evidence base from this repository's branch.

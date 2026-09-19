@@ -38,8 +38,7 @@ curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt in
 npm install -g @anthropic-ai/claude-code
 claude --version
 
-# 5. Docker (for NATS/Postgres later; optional for the first Picador sleeve)
-curl -fsSL https://get.docker.com | sh && sudo usermod -aG docker "$USER"   # log out/in afterwards
+# 5. (Docker is NOT needed for version 1: no NATS/Postgres until the octopus phase)
 
 # 6. Project directory and the research bundle
 mkdir -p ~/code/master-system && cd ~/code/master-system
@@ -59,7 +58,7 @@ cd ~/code/master-system
 claude
 ```
 1. In the session, type `/init` only after the build starts (it documents the codebase); for now paste the kickoff prompt.
-2. Open `docs/research/MASTER_KICKOFF_PROMPT.md` in another window, copy everything below the horizontal rule, paste it into the session and send.
+2. Open `docs/research/MASTER_KICKOFF_PROMPT.md` (the master system) in another window — use `PICADOR_KICKOFF_PROMPT.md` only if you want the prediction-market sleeve alone, copy everything below the horizontal rule, paste it into the session and send.
 3. The prompt's Step 0 re-reads the research bundle from `docs/research/`, so the session starts with the full evidence base even offline.
 4. Expected first outputs: `docs/PLAN.md` (Claude's restatement with disagreements), then deliverable 1 (repo scaffold). Review each stop point before saying "continue".
 5. When the session asks for credentials, provide **sandbox** keys only. Production keys enter only through the encrypted credential store the build creates, and only after the paper gates pass.
