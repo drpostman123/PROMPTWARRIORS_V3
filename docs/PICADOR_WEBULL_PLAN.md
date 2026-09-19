@@ -1,4 +1,6 @@
-# PICADOR — Webull OpenAPI Prediction-Market Bot: Master Plan (v1.0, 2026-09-19)
+# PICADOR — Webull OpenAPI Prediction-Market Bot: Master Plan (v1.1, 2026-09-19)
+
+> **v1.1:** three gap-research agents corrected several v1.0 facts. Read `PICADOR_RESEARCH_ADDENDA.md` alongside this file; where they disagree, the addenda win. Headline changes: BTC/ETH settle on a 60-second BRTI average; the S&P 4pm value is a real-time print, not the official close; SPX/XSP options data is required from day one (SPY strikes are too coarse); S4 near-expiry taking has negative measured markout and is removed; Webull crypto hours may be 24/7 and TIF may include GTC/IOC/FOK (both to be tested); sandbox = paper trading; MQTT has hard connection/symbol limits; the 2FA token dies after 15 idle days; Kalshi's authenticated WebSocket carries the resolution feed; Webull is under state enforcement for sports; tax treatment is unsettled; IBKR may be a cheaper API route and must be priced in Phase 0.
 
 **Name.** *Picador*: the rider who wears the bull down with small, precise jabs, over and
 over. A bot that chips cents out of Webull's event contracts thousands of times fits the
