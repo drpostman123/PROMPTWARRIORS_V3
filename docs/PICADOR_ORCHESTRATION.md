@@ -1,4 +1,6 @@
-# Picador Octopus — Multi-Broker Orchestration Design (v0.9 draft, 2026-09-19)
+# Picador Octopus — Multi-Broker Orchestration Design (v1.0, 2026-09-19)
+
+> **v1.0 changes after the broker fact sheets (`research/brokers.md`), the routing spec (`specs/events_routing.md`) and the red-team review (`research/redteam.md`):** only Webull, Kalshi direct and (pending a Phase-0 test) IBKR can trade event contracts by API today; Robinhood and tastytrade events are app-only and Public has none. Kalshi direct is the cheapest route at every price for takers and makers, so other routes are chosen for capital location and FCM redundancy, never for fee. **Version 1 of the system is single-host and single-venue**: no NATS, no Postgres, no warm standby. The desktop is a cold standby restored from encrypted backups. Any future multi-host lease lives in a third-party store with fencing tokens and manual promotion only, because a partitioned standby with cancel-all rights can damage a healthy primary, and because Webull rate limits are per App Key across hosts so a "read-only connected" standby degrades the primary. The octopus in §3 is the target for phase 3+, built one arm at a time.
 
 Scope: one operator, several brokerage accounts (Webull, Robinhood, tastytrade, Public,
 Kalshi direct; IBKR and Alpaca as candidates), each run by an independent "arm" bot, all
@@ -61,15 +63,15 @@ What the multi-account structure legitimately buys:
 Finalized from the broker research agent; see `docs/research/brokers.md` for sources and
 the unverified items.
 
-| Venue | Official retail API | Asset classes via API | Event contracts via API? | Event exchange(s) | Event fee per contract | Sandbox/paper | Role in the octopus |
+| Venue | Official retail API | Asset classes via API | Event contracts via API? | Event exchange(s) | Event fee per contract | Sandbox/paper | Role |
 |---|---|---|---|---|---|---|---|
-| Webull | Yes (OpenAPI) | stocks, options (equity), futures, crypto, events | **Yes** | Kalshi | $0.02/side flat | sandbox = paper | Primary event arm (already planned) |
-| Kalshi direct | Yes | events | **Yes** | Kalshi | quadratic taker, ~¼ maker | demo env | Cheapest maker route; resolution data feed; 24/7 crypto |
-| Robinhood | Crypto API only | crypto | **No** (app only) | Kalshi, ForecastEx, Rothera | k·P·(1−P), k=10 %/5 % Gold | none | Crypto hedge arm via official API; events manual only (no unofficial libraries) |
-| tastytrade | Yes (Open API) | equities, options, futures, futures options, crypto | pending | Kalshi via Apex | pending | cert sandbox | Options/futures hedge arm; event arm only if API-exposed |
-| Public | Yes (Individual Trader API) | stocks, options, **index options**, crypto, bonds | pending (no events product found) | — | — | pending | Index-options data and hedge arm |
-| IBKR (candidate) | Yes (TWS / Client Portal) | everything incl. Kalshi + ForecastEx contracts | Yes | Kalshi, ForecastEx | pending | paper | Possible cheapest all-in-one route |
-| Alpaca (candidate) | Yes | stocks, options, crypto; Kalshi events announced 2026-08-31 | pending | Kalshi | pending | paper | Watch |
+| Webull | Yes (OpenAPI) | stocks, options, futures, crypto, events | **Yes** | Kalshi | $0.02/side flat | sandbox = paper | Event arm #1 (taker); FCM redundancy |
+| Kalshi direct | Yes (REST/WS/FIX) | events | **Yes** (STP flag required on every order) | Kalshi | taker ≤ 1.75¢, maker ≤ 0.44¢ | demo env, separate keys | Cheapest route at every price; only maker route; resolution feed; 24/7 crypto |
+| IBKR | Yes (TWS / Web API) | everything; ForecastEx (`OPT`/`FORECASTX`), CME event FOPs; Kalshi in TWS but no API contract example found | Kalshi **UNVERIFIED**, ForecastEx yes | Kalshi, ForecastEx, CME | Kalshi $0.02; ForecastEx $0.01; CME $0.02 | paper (events UNVERIFIED) | Second FCM; only door to ForecastEx (a different book, so real cross-exchange arbitrage); smart-routing must be disabled |
+| Robinhood | Crypto Trading API only (no post-only flag); MCP agent for equities | crypto | **No** (app only; "coming soon" to MCP) | Kalshi, ForecastEx, Rothera | k·P·(1−P), k = 10 % / 5 % Gold, max $0.01 + $0.01 exchange | none | Crypto arm for CORE (cheapest maker tiers); never unofficial libraries (accounts frozen for API use) |
+| tastytrade | Yes (Open API, OAuth2, DXLink) | equities, options incl. SPXW, futures, futures options, crypto | **No** (Apex/Kalshi "Predict" is app/web only) | Kalshi via Apex | UNVERIFIED | cert sandbox (synthetic fills, no data) | Futures arm for MACRO; options backup for CONVEX |
+| Public | Yes (Individual Trader API, 10 req/s) | stocks, options, index options (XSP/SPX), crypto, bonds | **No** (no events product) | — | — | none | ETF arm for CORE; index-options arm for CONVEX |
+| Alpaca | Yes | stocks, options, crypto | **Not live** (FCM not yet operating) | Kalshi (planned) | undisclosed | paper | Watch |
 
 ## 3. Architecture
 

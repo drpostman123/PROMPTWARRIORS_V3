@@ -1,4 +1,6 @@
-# Master System Charter (v0.1, 2026-09-19)
+# Master System Charter (v0.2, 2026-09-19)
+
+> Canonical numbers (allocation, ladder, caps, gates) live in **one place**: `MASTER_KICKOFF_PROMPT.md` §"Canonical defaults". Where any other document disagrees, that section wins. Sleeve specifications: `specs/core.md`, `specs/convex.md`, `specs/macro.md`, `specs/events_routing.md`; sizing ladder: `research/sizing.md`; red-team review: `research/redteam.md`.
 
 The operator's stated goal, in order of priority:
 
